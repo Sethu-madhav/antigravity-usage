@@ -87,8 +87,18 @@ agy-usage sessions --model 3.8-flash
 agy-usage sessions --workspace mongo
 ```
 
-### 4. Turn-by-Turn Session Deep Dive (`agy-usage session <id>`)
-Inspects a specific session step-by-step:
+### 4. Inspect Current/Latest Session (`agy-usage current`)
+Immediately inspects your active/most recent conversation without needing to look up the session ID:
+```bash
+# Show current session details and last 30 turns
+agy-usage current
+
+# Show current session with last 10 turns (or -n 0 for all turns)
+agy-usage current -n 10
+```
+
+### 5. Turn-by-Turn Session Deep Dive (`agy-usage session [id]`)
+Inspects any specific session step-by-step (or defaults to current if omitted):
 ```bash
 agy-usage session b4cba2f9
 ```
@@ -97,7 +107,7 @@ Outputs:
 - Inline sparkline of token progression across turns (`[  ▂▃▄▅▆▇█]`)
 - Step table: Step #, Timestamp, Prompt Tokens, Cached Tokens, Thought Tokens, Output Tokens, Total, and Cache Hit Rate.
 
-### 5. Weekly Rollups (`agy-usage weekly`)
+### 6. Weekly Rollups (`agy-usage weekly`)
 Aggregates usage by ISO week with dates and relative volume bars:
 ```bash
 agy-usage weekly

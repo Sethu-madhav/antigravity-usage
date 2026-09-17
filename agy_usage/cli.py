@@ -34,6 +34,7 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         epilog="""
 Examples:
   agy-usage                       Show summary dashboard & mini heatmap
+  agy-usage current               Show token usage & turns for the most recent session
   agy-usage heatmap               Show full GitHub-style contribution heatmap
   agy-usage heatmap --metric cached  Heatmap colored by cached tokens
   agy-usage sessions              List recent conversation sessions and token stats
@@ -138,15 +139,37 @@ Examples:
         "--workspace", help="Filter sessions by workspace name"
     )
 
-    # 4. session <id>
+    # 4. current
+    sub_current = subparsers.add_parser(
+        "current", help="Show turn-by-turn token usage for the most recent session"
+    )
+    sub_current.add_argument(
+        "-n",
+        "--turns",
+        type=int,
+        default=30,
+        help="Maximum turns to display in the log table (0 for all, default: 30)",
+    )
+
+    # 5. session <id>
     sub_session = subparsers.add_parser(
         "session", help="Inspect turn-by-turn token details for a specific session"
     )
     sub_session.add_argument(
-        "session_id", help="Session ID (UUID or first 8 characters)"
+        "session_id",
+        nargs="?",
+        default="current",
+        help="Session ID (UUID or first 8 characters, default: current)",
+    )
+    sub_session.add_argument(
+        "-n",
+        "--turns",
+        type=int,
+        default=30,
+        help="Maximum turns to display in the log table (0 for all, default: 30)",
     )
 
-    # 5. weekly
+    # 6. weekly
     subparsers.add_parser(
         "weekly", help="Weekly token usage table and volume chart"
     )
@@ -393,23 +416,38 @@ def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> No
     print(Colors.dim(f"Hint: Inspect a specific session in detail with: agy-usage session <session_id>"))
 
 
-def cmd_session_inspect(sessions: List[SessionSummary], session_id_arg: str) -> None:
+def cmd_session_inspect(
+    sessions: List[SessionSummary],
+    session_id_arg: str = "current",
+    turns_limit: int = 30,
+) -> None:
     """Inspect a single session's step-by-step token details."""
-    target_id = session_id_arg.strip().lower()
+    if not sessions:
+        print(Colors.yellow("No Antigravity conversation sessions found."))
+        return
+
+    target_id = (session_id_arg or "current").strip().lower()
     matched = None
-    for s in sessions:
-        if s.session_id.lower().startswith(target_id):
-            matched = s
-            break
+
+    if target_id in ("current", "latest", "recent"):
+        matched = sessions[0]
+    else:
+        for s in sessions:
+            if s.session_id.lower().startswith(target_id):
+                matched = s
+                break
 
     if not matched:
         print(Colors.red(f"Session '{session_id_arg}' not found."))
         print(Colors.dim("Run 'agy-usage sessions' to see all available session IDs."))
         return
 
+    is_current = (matched == sessions[0])
+    label_suffix = " (Most Recent)" if is_current else ""
+
     u = matched.usage
     print()
-    print(Colors.bold(Colors.cyan(f"── SESSION DETAILS: {matched.session_id} " + "─" * 20)))
+    print(Colors.bold(Colors.cyan(f"── SESSION DETAILS: {matched.session_id}{label_suffix} " + "─" * 16)))
     print(f"  {Colors.bold('Title:')}        {matched.title}")
     print(f"  {Colors.bold('Workspace:')}    {matched.workspace}")
     print(f"  {Colors.bold('Source:')}       {matched.source.upper()} ({matched.file_path})")
@@ -424,17 +462,23 @@ def cmd_session_inspect(sessions: List[SessionSummary], session_id_arg: str) -> 
     print()
 
     if matched.steps:
-        # Step Progression Sparkline
+        total_steps = len(matched.steps)
         step_tokens = [float(st.usage.total_tokens) for st in matched.steps]
         spark = render_sparkline(step_tokens)
         print(Colors.bold("Token Volume Progression Across Turns:"))
-        print(f"  [{Colors.green(spark)}] ({len(matched.steps)} turns)")
+        print(f"  [{Colors.green(spark)}] ({total_steps} turns)")
         print()
+
+        displayed_steps = matched.steps
+        title_log = "TURN-BY-TURN TOKEN LOG"
+        if turns_limit > 0 and total_steps > turns_limit:
+            displayed_steps = matched.steps[-turns_limit:]
+            title_log = f"TURN-BY-TURN TOKEN LOG (Showing last {turns_limit} of {total_steps} turns, use -n 0 for all)"
 
         # Step Details Table
         s_headers = ["Step", "Time", "Model", "Prompt", "Cached", "Thoughts", "Output", "Total", "Cache %"]
         s_rows = []
-        for step in matched.steps:
+        for step in displayed_steps:
             su = step.usage
             t_str = step.timestamp.strftime("%H:%M:%S")
             s_rows.append([
@@ -448,7 +492,7 @@ def cmd_session_inspect(sessions: List[SessionSummary], session_id_arg: str) -> 
                 Colors.bold(format_tokens(su.total_tokens)),
                 format_percent(su.cache_hit_rate),
             ])
-        print(render_table(s_headers, s_rows, alignments=["right", "center", "left", "right", "right", "right", "right", "right", "right"], title="TURN-BY-TURN TOKEN LOG"))
+        print(render_table(s_headers, s_rows, alignments=["right", "center", "left", "right", "right", "right", "right", "right", "right"], title=title_log))
     else:
         print(Colors.dim("No individual step token records found in this session database."))
 
@@ -607,8 +651,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         cmd_heatmap(sessions, args)
     elif sub == "sessions":
         cmd_sessions(sessions, args)
+    elif sub == "current":
+        cmd_session_inspect(sessions, "current", turns_limit=getattr(args, "turns", 30))
     elif sub == "session":
-        cmd_session_inspect(sessions, args.session_id)
+        cmd_session_inspect(sessions, args.session_id, turns_limit=getattr(args, "turns", 30))
     elif sub == "weekly":
         cmd_weekly(sessions)
     elif sub == "monthly":
