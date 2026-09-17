@@ -242,32 +242,46 @@ def strip_ansi(text: str) -> str:
     return ansi_pattern.sub("", text)
 
 
-def render_kpi_card(title: str, value: str, subtext: str = "", width: int = 24) -> str:
-    """Render a single boxed KPI stat card."""
+def render_kpi_card(title: str, value: str, subtext: str = "", width: int = 26) -> str:
+    """Render a single boxed KPI stat card with strict width alignment."""
     h_line = "─" * (width - 2)
     top = f"┌{h_line}┐"
     bot = f"└{h_line}┘"
 
-    t_vis = len(strip_ansi(title))
-    v_vis = len(strip_ansi(value))
-    s_vis = len(strip_ansi(subtext))
+    def pad_line(content: str) -> str:
+        vis_len = len(strip_ansi(content))
+        max_content = width - 4
+        if vis_len > max_content:
+            content = content[: max_content - 1] + "…"
+            vis_len = max_content
+        padding = " " * (width - 3 - vis_len)
+        return f"│ {content}{padding}│"
 
-    t_line = f"│ {title}" + " " * max(0, width - 3 - t_vis) + "│"
-    v_line = f"│ {value}" + " " * max(0, width - 3 - v_vis) + "│"
-    s_line = f"│ {subtext}" + " " * max(0, width - 3 - s_vis) + "│"
-
-    return "\n".join([top, t_line, v_line, s_line, bot])
+    return "\n".join([top, pad_line(title), pad_line(value), pad_line(subtext), bot])
 
 
 def render_kpi_grid(cards: List[Tuple[str, str, str]], card_width: int = 26) -> str:
-    """Render multiple KPI cards side-by-side."""
-    card_boxes = [render_kpi_card(t, v, s, width=card_width).split("\n") for t, v, s in cards]
-    if not card_boxes:
+    """Render multiple KPI cards side-by-side (wrapping into balanced rows if terminal is narrow)."""
+    if not cards:
         return ""
 
-    num_lines = len(card_boxes[0])
-    combined_lines = []
-    for line_idx in range(num_lines):
-        line_parts = [box[line_idx] for box in card_boxes]
-        combined_lines.append("  ".join(line_parts))
-    return "\n".join(combined_lines)
+    import shutil
+    term_cols = shutil.get_terminal_size((100, 24)).columns
+    if len(cards) == 4 and term_cols < (4 * (card_width + 2)):
+        cards_per_row = 2
+    else:
+        cards_per_row = max(1, term_cols // (card_width + 2))
+        cards_per_row = min(cards_per_row, len(cards))
+
+    chunks = [cards[i : i + cards_per_row] for i in range(0, len(cards), cards_per_row)]
+    row_strings = []
+
+    for chunk in chunks:
+        card_boxes = [render_kpi_card(t, v, s, width=card_width).split("\n") for t, v, s in chunk]
+        num_lines = len(card_boxes[0])
+        for line_idx in range(num_lines):
+            line_parts = [box[line_idx] for box in card_boxes]
+            row_strings.append("  ".join(line_parts))
+
+    return "\n".join(row_strings)
+

@@ -192,5 +192,63 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         self.assertIn("s1,cli,ws", csv_out)
 
 
+class TestSessionInspect(unittest.TestCase):
+    def setUp(self):
+        import io
+        import sys
+        self.io = io
+        self.sys = sys
+        t = datetime(2026, 9, 1, 12, 0)
+        self.session = SessionSummary(
+            session_id="test-session-12345",
+            source="cli",
+            file_path="/tmp/test.db",
+            title="Inspect Test",
+            workspace="test-ws",
+            models=["gemini-3.8-flash"],
+            start_time=t,
+            end_time=t,
+            step_count=2,
+            usage=TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200, thought_tokens=50, candidate_tokens=150),
+            steps=[
+                StepRecord(step_idx=1, timestamp=t, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=500, cached_tokens=2000, output_tokens=100)),
+                StepRecord(step_idx=2, timestamp=t, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=500, cached_tokens=2000, output_tokens=100)),
+            ],
+        )
+
+    def test_default_inspect_shows_totals_only(self):
+        from agy_usage.cli import cmd_session_inspect
+        buf = self.io.StringIO()
+        old_stdout = self.sys.stdout
+        try:
+            self.sys.stdout = buf
+            cmd_session_inspect([self.session], session_id_arg="current")
+        finally:
+            self.sys.stdout = old_stdout
+
+        out = buf.getvalue()
+        self.assertIn("SESSION TOTALS", out)
+        self.assertIn("TOTAL PROCESSED", out)
+        self.assertIn("CACHE SAVINGS", out)
+        self.assertIn("TOKEN USAGE BREAKDOWN", out)
+        self.assertNotIn("TURN-BY-TURN TOKEN LOG", out)
+
+    def test_inspect_with_details_shows_turn_log(self):
+        from agy_usage.cli import cmd_session_inspect
+        buf = self.io.StringIO()
+        old_stdout = self.sys.stdout
+        try:
+            self.sys.stdout = buf
+            cmd_session_inspect([self.session], session_id_arg="current", show_details=True)
+        finally:
+            self.sys.stdout = old_stdout
+
+        out = buf.getvalue()
+        self.assertIn("SESSION TOTALS", out)
+        self.assertIn("TURN-BY-TURN TOKEN LOG", out)
+        self.assertIn("#1", out)
+        self.assertIn("#2", out)
+
+
 if __name__ == "__main__":
     unittest.main()

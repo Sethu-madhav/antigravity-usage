@@ -121,6 +121,7 @@ Examples:
     )
     sub_sessions.add_argument(
         "-n",
+        "-l",
         "--limit",
         type=int,
         default=15,
@@ -141,19 +142,25 @@ Examples:
 
     # 4. current
     sub_current = subparsers.add_parser(
-        "current", help="Show turn-by-turn token usage for the most recent session"
+        "current", help="Show token usage totals for the most recent session"
+    )
+    sub_current.add_argument(
+        "--details",
+        "--log",
+        action="store_true",
+        help="Display turn-by-turn token log table",
     )
     sub_current.add_argument(
         "-n",
         "--turns",
         type=int,
-        default=30,
-        help="Maximum turns to display in the log table (0 for all, default: 30)",
+        default=None,
+        help="Display last N turns in a log table (0 for all turns)",
     )
 
     # 5. session <id>
     sub_session = subparsers.add_parser(
-        "session", help="Inspect turn-by-turn token details for a specific session"
+        "session", help="Inspect token usage totals for a specific session"
     )
     sub_session.add_argument(
         "session_id",
@@ -162,11 +169,17 @@ Examples:
         help="Session ID (UUID or first 8 characters, default: current)",
     )
     sub_session.add_argument(
+        "--details",
+        "--log",
+        action="store_true",
+        help="Display turn-by-turn token log table",
+    )
+    sub_session.add_argument(
         "-n",
         "--turns",
         type=int,
-        default=30,
-        help="Maximum turns to display in the log table (0 for all, default: 30)",
+        default=None,
+        help="Display last N turns in a log table (0 for all turns)",
     )
 
     # 6. weekly
@@ -419,9 +432,10 @@ def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> No
 def cmd_session_inspect(
     sessions: List[SessionSummary],
     session_id_arg: str = "current",
-    turns_limit: int = 30,
+    turns_limit: Optional[int] = None,
+    show_details: bool = False,
 ) -> None:
-    """Inspect a single session's step-by-step token details."""
+    """Inspect a session's token totals and optionally turn-by-turn details."""
     if not sessions:
         print(Colors.yellow("No Antigravity conversation sessions found."))
         return
@@ -447,35 +461,104 @@ def cmd_session_inspect(
 
     u = matched.usage
     print()
-    print(Colors.bold(Colors.cyan(f"── SESSION DETAILS: {matched.session_id}{label_suffix} " + "─" * 16)))
+    print(Colors.bold(Colors.cyan(f"── SESSION TOTALS: {matched.session_id}{label_suffix} " + "─" * 16)))
     print(f"  {Colors.bold('Title:')}        {matched.title}")
-    print(f"  {Colors.bold('Workspace:')}    {matched.workspace}")
-    print(f"  {Colors.bold('Source:')}       {matched.source.upper()} ({matched.file_path})")
-    print(f"  {Colors.bold('Model(s):')}     {', '.join(matched.models)}")
+    print(f"  {Colors.bold('Workspace:')}    {Colors.cyan(matched.workspace)}")
+    print(f"  {Colors.bold('Source:')}       {matched.source.upper()} ({Colors.dim(matched.file_path)})")
+    print(f"  {Colors.bold('Model(s):')}     {', '.join(matched.models) if matched.models else 'N/A'}")
     started_str = matched.start_time.strftime("%Y-%m-%d %H:%M:%S") if matched.start_time else "N/A"
     ended_str = matched.end_time.strftime("%Y-%m-%d %H:%M:%S") if matched.end_time else "N/A"
-    print(f"  {Colors.bold('Time:')}         {started_str} -> {ended_str} ({format_duration(matched.duration_seconds)})")
-    print(f"  {Colors.bold('Total Tokens:')} {u.total_tokens:,} ({format_tokens(u.total_tokens)})")
-    print(f"  {Colors.bold('Cached Tokens:')}{u.cached_tokens:,} ({format_percent(u.cache_hit_rate)} prompt hit rate)")
-    print(f"  {Colors.bold('Prompt Tokens:')}{u.prompt_tokens:,} (non-cached)")
-    print(f"  {Colors.bold('Output Tokens:')}{u.output_tokens:,} (thoughts: {u.thought_tokens:,}, text: {u.candidate_tokens:,})")
+    turns_str = f", {len(matched.steps)} turns" if matched.steps else ""
+    print(f"  {Colors.bold('Time:')}         {started_str} → {ended_str} ({format_duration(matched.duration_seconds)}{turns_str})")
     print()
 
+    # 1. KPI Cards
+    card1 = (
+        "TOTAL PROCESSED",
+        Colors.bold(Colors.green(format_tokens(u.total_tokens))),
+        f"{format_tokens(u.total_prompt_tokens)} in / {format_tokens(u.output_tokens)} out",
+    )
+    card2 = (
+        "CACHE SAVINGS",
+        Colors.bold(Colors.green(format_tokens(u.cached_tokens))),
+        f"{format_percent(u.cache_hit_rate)} prompt hit rate",
+    )
+    card3 = (
+        "BILLABLE CONSUMED",
+        Colors.bold(Colors.yellow(format_tokens(u.billable_tokens))),
+        f"{format_tokens(u.prompt_tokens)} in + {format_tokens(u.output_tokens)} out",
+    )
+    card4 = (
+        "OUTPUT BREAKDOWN",
+        Colors.bold(Colors.cyan(format_tokens(u.output_tokens))),
+        f"{format_tokens(u.thought_tokens)} thk / {format_tokens(u.candidate_tokens)} txt",
+    )
+    print(render_kpi_grid([card1, card2, card3, card4]))
+    print()
+
+    # 2. Token Breakdown Table
+    categories = [
+        ("Cached Prompt", u.cached_tokens),
+        ("Non-Cached Prompt", u.prompt_tokens),
+    ]
+    if u.thought_tokens > 0 or u.candidate_tokens > 0:
+        categories.append(("Reasoning (Thoughts)", u.thought_tokens))
+        categories.append(("Candidate (Output)", u.candidate_tokens))
+    else:
+        categories.append(("Output Tokens", u.output_tokens))
+
+    max_cat = max((c[1] for c in categories), default=1) or 1
+    total_tok = u.total_tokens or 1
+
+    b_headers = ["Category", "Tokens", "Compact", "Share", "Relative Volume"]
+    b_rows = []
+    for cat_name, cat_val in categories:
+        share = (cat_val / total_tok) * 100.0
+        bar = render_bar(cat_val, max_cat, width=16)
+        b_rows.append([
+            cat_name,
+            f"{cat_val:,}",
+            format_tokens(cat_val),
+            format_percent(share),
+            bar,
+        ])
+
+    b_rows.append([
+        Colors.bold("Total Processed"),
+        Colors.bold(f"{u.total_tokens:,}"),
+        Colors.bold(Colors.green(format_tokens(u.total_tokens))),
+        "100.0%",
+        "",
+    ])
+    billable_share = (u.billable_tokens / total_tok) * 100.0
+    b_rows.append([
+        Colors.bold("Billable Consumed"),
+        Colors.bold(f"{u.billable_tokens:,}"),
+        Colors.bold(Colors.yellow(format_tokens(u.billable_tokens))),
+        format_percent(billable_share),
+        "",
+    ])
+
+    print(render_table(b_headers, b_rows, alignments=["left", "right", "right", "right", "left"], title="TOKEN USAGE BREAKDOWN"))
+    print()
+
+    # 3. Progression Sparkline
     if matched.steps:
-        total_steps = len(matched.steps)
         step_tokens = [float(st.usage.total_tokens) for st in matched.steps]
         spark = render_sparkline(step_tokens)
-        print(Colors.bold("Token Volume Progression Across Turns:"))
-        print(f"  [{Colors.green(spark)}] ({total_steps} turns)")
-        print()
+        print(f"  {Colors.bold('Progression:')} [{Colors.green(spark)}] ({len(matched.steps)} turns)")
 
+    # 4. Turn-by-Turn Log Table (Only if requested via --details or -n)
+    should_show_turns = show_details or (turns_limit is not None)
+    if should_show_turns and matched.steps:
+        total_steps = len(matched.steps)
+        actual_limit = 30 if turns_limit is None else turns_limit
         displayed_steps = matched.steps
         title_log = "TURN-BY-TURN TOKEN LOG"
-        if turns_limit > 0 and total_steps > turns_limit:
-            displayed_steps = matched.steps[-turns_limit:]
-            title_log = f"TURN-BY-TURN TOKEN LOG (Showing last {turns_limit} of {total_steps} turns, use -n 0 for all)"
+        if actual_limit > 0 and total_steps > actual_limit:
+            displayed_steps = matched.steps[-actual_limit:]
+            title_log = f"TURN-BY-TURN TOKEN LOG (Showing last {actual_limit} of {total_steps} turns, use -n 0 for all)"
 
-        # Step Details Table
         s_headers = ["Step", "Time", "Model", "Prompt", "Cached", "Thoughts", "Output", "Total", "Cache %"]
         s_rows = []
         for step in displayed_steps:
@@ -492,9 +575,12 @@ def cmd_session_inspect(
                 Colors.bold(format_tokens(su.total_tokens)),
                 format_percent(su.cache_hit_rate),
             ])
+        print()
         print(render_table(s_headers, s_rows, alignments=["right", "center", "left", "right", "right", "right", "right", "right", "right"], title=title_log))
-    else:
-        print(Colors.dim("No individual step token records found in this session database."))
+    elif not should_show_turns:
+        cmd_name = "current" if is_current else f"session {matched.short_id}"
+        print()
+        print(Colors.dim(f"Hint: For turn-by-turn logs, use: agy-usage {cmd_name} --details (or -n <count>)"))
 
 
 def cmd_weekly(sessions: List[SessionSummary]) -> None:
@@ -652,9 +738,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif sub == "sessions":
         cmd_sessions(sessions, args)
     elif sub == "current":
-        cmd_session_inspect(sessions, "current", turns_limit=getattr(args, "turns", 30))
+        turns = getattr(args, "turns", None)
+        details = getattr(args, "details", False)
+        cmd_session_inspect(sessions, "current", turns_limit=turns, show_details=details)
     elif sub == "session":
-        cmd_session_inspect(sessions, args.session_id, turns_limit=getattr(args, "turns", 30))
+        turns = getattr(args, "turns", None)
+        details = getattr(args, "details", False)
+        cmd_session_inspect(sessions, args.session_id, turns_limit=turns, show_details=details)
     elif sub == "weekly":
         cmd_weekly(sessions)
     elif sub == "monthly":

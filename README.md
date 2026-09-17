@@ -87,25 +87,32 @@ agy-usage sessions --model 3.8-flash
 agy-usage sessions --workspace mongo
 ```
 
-### 4. Inspect Current/Latest Session (`agy-usage current`)
-Immediately inspects your active/most recent conversation without needing to look up the session ID:
+### 4. Inspect Current Session Totals (`agy-usage current`)
+Immediately inspects your active/most recent conversation totals without turn-by-turn clutter:
 ```bash
-# Show current session details and last 30 turns
+# Show current session totals (KPI cards, breakdown table, progression sparkline)
 agy-usage current
 
-# Show current session with last 10 turns (or -n 0 for all turns)
+# Optionally show turn-by-turn logs for the last 10 turns (or -n 0 for all turns)
 agy-usage current -n 10
+agy-usage current --details
 ```
 
-### 5. Turn-by-Turn Session Deep Dive (`agy-usage session [id]`)
-Inspects any specific session step-by-step (or defaults to current if omitted):
+### 5. Session Totals & Turn Deep Dive (`agy-usage session [id]`)
+Inspects totals for any specific session (or defaults to current if omitted):
 ```bash
+# Inspect session totals
 agy-usage session b4cba2f9
+
+# View turn-by-turn logs table for that session
+agy-usage session b4cba2f9 --details
 ```
 Outputs:
-- Session metadata (title, workspace, duration, model, start/end time)
+- Session metadata (title, workspace, duration, model, start/end time, turns)
+- KPI cards: Total Processed, Cache Savings, Billable Consumed, Output Breakdown
+- Token Usage Breakdown table with exact counts, compact suffixes, share percentages, and relative volume bars
 - Inline sparkline of token progression across turns (`[  ▂▃▄▅▆▇█]`)
-- Step table: Step #, Timestamp, Prompt Tokens, Cached Tokens, Thought Tokens, Output Tokens, Total, and Cache Hit Rate.
+- Optional turn-by-turn log table (when `--details` or `-n <count>` is passed)
 
 ### 6. Weekly Rollups (`agy-usage weekly`)
 Aggregates usage by ISO week with dates and relative volume bars:
