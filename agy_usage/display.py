@@ -96,6 +96,17 @@ def format_percent(val: float) -> str:
     return Colors.gray(pct_str)
 
 
+def format_cost(val: float) -> str:
+    """Format USD cost with appropriate decimal precision."""
+    if val <= 0:
+        return "$0.00"
+    if val < 0.001:
+        return f"${val:.4f}"
+    if val < 0.01:
+        return f"${val:.3f}"
+    return f"${val:.2f}"
+
+
 def format_duration(seconds: float) -> str:
     """Format duration in seconds into human-readable time."""
     if seconds <= 0:

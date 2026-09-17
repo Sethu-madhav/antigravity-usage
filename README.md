@@ -109,9 +109,8 @@ agy-usage session b4cba2f9 --details
 ```
 Outputs:
 - Session metadata (title, workspace, duration, model, start/end time, turns)
-- KPI cards: Total Processed, Cache Savings, Billable Consumed, Output Breakdown
-- Token Usage Breakdown table with exact counts, compact suffixes, share percentages, and relative volume bars
-- Inline sparkline of token progression across turns (`[  ▂▃▄▅▆▇█]`)
+- KPI cards: Total Processed, Cache Savings, Billable Consumed, Estimated Cost
+- Token Usage Breakdown table with exact counts, compact suffixes, share percentages, estimated USD cost, and relative volume bars
 - Optional turn-by-turn log table (when `--details` or `-n <count>` is passed)
 
 ### 6. Weekly Rollups (`agy-usage weekly`)

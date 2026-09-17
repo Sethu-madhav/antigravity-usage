@@ -64,6 +64,48 @@ class TokenUsage:
         }
 
 
+# Standard official Google Gemini API rates per 1,000,000 tokens:
+# Format: (prompt_rate, cached_read_rate, output_rate)
+MODEL_RATES: Dict[str, tuple[float, float, float]] = {
+    "gemini-3.8-flash": (0.75, 0.075, 3.75),
+    "gemini-3.7-flash": (0.75, 0.075, 3.75),
+    "gemini-2.5-flash": (0.30, 0.030, 2.50),
+    "gemini-2.0-flash": (0.10, 0.025, 0.40),
+    "gemini-1.5-flash": (0.075, 0.01875, 0.30),
+    "gemini-2.5-pro": (1.25, 0.3125, 5.00),
+    "gemini-1.5-pro": (1.25, 0.3125, 5.00),
+}
+
+
+def get_model_rates(model_name: str) -> tuple[float, float, float]:
+    """Get (prompt_per_m, cache_per_m, output_per_m) rates for a given model."""
+    m = (model_name or "").lower()
+    for key, rates in MODEL_RATES.items():
+        if key in m:
+            return rates
+    if "pro" in m:
+        return (1.25, 0.3125, 5.00)
+    return (0.75, 0.075, 3.75)
+
+
+def calculate_cost(
+    prompt_tokens: int,
+    cached_tokens: int,
+    output_tokens: int,
+    model_name: str = "gemini-3.8-flash",
+) -> tuple[float, float, float, float]:
+    """
+    Calculate estimated cost in USD based on official token pricing.
+    Returns: (prompt_cost, cache_cost, output_cost, total_cost)
+    """
+    p_rate, c_rate, o_rate = get_model_rates(model_name)
+    p_cost = (prompt_tokens / 1_000_000.0) * p_rate
+    c_cost = (cached_tokens / 1_000_000.0) * c_rate
+    o_cost = (output_tokens / 1_000_000.0) * o_rate
+    total = p_cost + c_cost + o_cost
+    return p_cost, c_cost, o_cost, total
+
+
 @dataclass
 class StepRecord:
     """Represents a single model generation step in a conversation."""

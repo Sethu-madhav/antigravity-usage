@@ -230,7 +230,12 @@ class TestSessionInspect(unittest.TestCase):
         self.assertIn("SESSION TOTALS", out)
         self.assertIn("TOTAL PROCESSED", out)
         self.assertIn("CACHE SAVINGS", out)
+        self.assertIn("BILLABLE CONSUMED", out)
+        self.assertIn("ESTIMATED COST", out)
         self.assertIn("TOKEN USAGE BREAKDOWN", out)
+        self.assertIn("Cost", out)
+        # Verify progression row is removed
+        self.assertNotIn("Progression:", out)
         self.assertNotIn("TURN-BY-TURN TOKEN LOG", out)
 
     def test_inspect_with_details_shows_turn_log(self):
@@ -248,6 +253,21 @@ class TestSessionInspect(unittest.TestCase):
         self.assertIn("TURN-BY-TURN TOKEN LOG", out)
         self.assertIn("#1", out)
         self.assertIn("#2", out)
+        self.assertNotIn("Progression:", out)
+
+    def test_calculate_cost_and_format(self):
+        from agy_usage.models import calculate_cost
+        from agy_usage.display import format_cost
+        # 1M prompt @ $0.75, 1M cache @ $0.075, 1M output @ $3.75
+        p_c, c_c, o_c, tot = calculate_cost(1_000_000, 1_000_000, 1_000_000, "gemini-3.8-flash")
+        self.assertAlmostEqual(p_c, 0.75)
+        self.assertAlmostEqual(c_c, 0.075)
+        self.assertAlmostEqual(o_c, 3.75)
+        self.assertAlmostEqual(tot, 4.575)
+
+        self.assertEqual(format_cost(4.575), "$4.58")
+        self.assertEqual(format_cost(0.005), "$0.005")
+        self.assertEqual(format_cost(0.0), "$0.00")
 
 
 if __name__ == "__main__":

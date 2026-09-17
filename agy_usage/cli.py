@@ -12,6 +12,7 @@ from agy_usage import __version__
 from agy_usage.aggregator import UsageAggregator
 from agy_usage.display import (
     Colors,
+    format_cost,
     format_duration,
     format_percent,
     format_tokens,
@@ -22,7 +23,7 @@ from agy_usage.display import (
 )
 from agy_usage.exporter import UsageExporter
 from agy_usage.heatmap import TerminalHeatmap
-from agy_usage.models import SessionSummary
+from agy_usage.models import SessionSummary, calculate_cost
 from agy_usage.parser import AntigravityParser
 
 
@@ -271,15 +272,17 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> No
         Colors.bold(Colors.green(format_tokens(u.cached_tokens))),
         f"{format_percent(u.cache_hit_rate)} prompt hit rate",
     )
+    p_c, _, o_c, tot_c = calculate_cost(u.prompt_tokens, u.cached_tokens, u.output_tokens)
+    bill_c = p_c + o_c
     card3 = (
         "BILLABLE CONSUMED",
         Colors.bold(Colors.yellow(format_tokens(u.billable_tokens))),
-        f"{format_tokens(u.prompt_tokens)} in + {format_tokens(u.output_tokens)} out",
+        f"{format_tokens(u.prompt_tokens)} in + {format_tokens(u.output_tokens)} out ({format_cost(bill_c)})",
     )
     card4 = (
         "ACTIVITY",
         Colors.bold(Colors.cyan(f"{summary['session_count']} sessions")),
-        f"{summary['step_count']} steps / {summary['active_days']} days",
+        f"{summary['step_count']} steps / {summary['active_days']} days ({format_cost(tot_c)})",
     )
 
     print(render_kpi_grid([card1, card2, card3, card4]))
@@ -295,10 +298,11 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> No
     # 3. Model Breakdown Table
     models = summary["models"]
     if models:
-        m_headers = ["Model", "Requests", "Prompt", "Cached", "Output", "Total", "Share", "Cache %"]
+        m_headers = ["Model", "Requests", "Prompt", "Cached", "Output", "Total", "Share", "Cost", "Cache %"]
         m_rows = []
         for m in models:
             mu = m.usage
+            _, _, _, m_cost = calculate_cost(mu.prompt_tokens, mu.cached_tokens, mu.output_tokens, model_name=m.model_name)
             m_rows.append([
                 Colors.bold(m.model_name),
                 f"{m.request_count:,}",
@@ -307,9 +311,10 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> No
                 format_tokens(mu.output_tokens),
                 Colors.bold(format_tokens(mu.total_tokens)),
                 f"{m.percentage_of_total:.1f}%",
+                format_cost(m_cost),
                 format_percent(mu.cache_hit_rate),
             ])
-        print(render_table(m_headers, m_rows, alignments=["left", "right", "right", "right", "right", "right", "right", "right"], title="MODEL TOKEN USAGE"))
+        print(render_table(m_headers, m_rows, alignments=["left", "right", "right", "right", "right", "right", "right", "right", "right"], title="MODEL TOKEN USAGE"))
         print()
 
     # 4. Recent Sessions Table
@@ -402,11 +407,12 @@ def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> No
     limit = args.limit if args.limit > 0 else len(sessions)
     selected = sessions[:limit]
 
-    headers = ["Session ID", "Src", "Workspace", "Title", "Model", "Steps", "Prompt", "Cached", "Output", "Total", "Cache %", "Duration", "Started"]
+    headers = ["Session ID", "Src", "Workspace", "Title", "Model", "Steps", "Prompt", "Cached", "Output", "Total", "Cost", "Cache %", "Duration", "Started"]
     rows = []
     for s in selected:
         u = s.usage
         started_str = s.start_time.strftime("%Y-%m-%d %H:%M") if s.start_time else "N/A"
+        _, _, _, s_cost = calculate_cost(u.prompt_tokens, u.cached_tokens, u.output_tokens, model_name=s.primary_model)
         rows.append([
             Colors.cyan(s.short_id),
             Colors.dim(s.source.upper()),
@@ -418,13 +424,14 @@ def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> No
             format_tokens(u.cached_tokens),
             format_tokens(u.output_tokens),
             Colors.bold(format_tokens(u.total_tokens)),
+            format_cost(s_cost),
             format_percent(u.cache_hit_rate),
             format_duration(s.duration_seconds),
             Colors.dim(started_str),
         ])
 
     print()
-    print(render_table(headers, rows, alignments=["left", "center", "left", "left", "left", "right", "right", "right", "right", "right", "right", "right", "right"], title=f"CONVERSATION SESSIONS ({len(selected)} of {len(sessions)})"))
+    print(render_table(headers, rows, alignments=["left", "center", "left", "left", "left", "right", "right", "right", "right", "right", "right", "right", "right", "right"], title=f"CONVERSATION SESSIONS ({len(selected)} of {len(sessions)})"))
     print()
     print(Colors.dim(f"Hint: Inspect a specific session in detail with: agy-usage session <session_id>"))
 
@@ -472,6 +479,15 @@ def cmd_session_inspect(
     print(f"  {Colors.bold('Time:')}         {started_str} → {ended_str} ({format_duration(matched.duration_seconds)}{turns_str})")
     print()
 
+    # Cost calculations
+    model_name = matched.primary_model or (matched.models[0] if matched.models else "gemini-3.8-flash")
+    p_cost, c_cost, o_cost, total_cost = calculate_cost(
+        u.prompt_tokens, u.cached_tokens, u.output_tokens, model_name=model_name
+    )
+    billable_cost = p_cost + o_cost
+    _, _, th_cost, _ = calculate_cost(0, 0, u.thought_tokens, model_name=model_name)
+    _, _, ca_cost, _ = calculate_cost(0, 0, u.candidate_tokens, model_name=model_name)
+
     # 1. KPI Cards
     card1 = (
         "TOTAL PROCESSED",
@@ -489,30 +505,30 @@ def cmd_session_inspect(
         f"{format_tokens(u.prompt_tokens)} in + {format_tokens(u.output_tokens)} out",
     )
     card4 = (
-        "OUTPUT BREAKDOWN",
-        Colors.bold(Colors.cyan(format_tokens(u.output_tokens))),
-        f"{format_tokens(u.thought_tokens)} thk / {format_tokens(u.candidate_tokens)} txt",
+        "ESTIMATED COST",
+        Colors.bold(Colors.green(format_cost(total_cost))),
+        f"Billable: {format_cost(billable_cost)}",
     )
     print(render_kpi_grid([card1, card2, card3, card4]))
     print()
 
     # 2. Token Breakdown Table
     categories = [
-        ("Cached Prompt", u.cached_tokens),
-        ("Non-Cached Prompt", u.prompt_tokens),
+        ("Cached Prompt", u.cached_tokens, c_cost),
+        ("Non-Cached Prompt", u.prompt_tokens, p_cost),
     ]
     if u.thought_tokens > 0 or u.candidate_tokens > 0:
-        categories.append(("Reasoning (Thoughts)", u.thought_tokens))
-        categories.append(("Candidate (Output)", u.candidate_tokens))
+        categories.append(("Reasoning (Thoughts)", u.thought_tokens, th_cost))
+        categories.append(("Candidate (Output)", u.candidate_tokens, ca_cost))
     else:
-        categories.append(("Output Tokens", u.output_tokens))
+        categories.append(("Output Tokens", u.output_tokens, o_cost))
 
     max_cat = max((c[1] for c in categories), default=1) or 1
     total_tok = u.total_tokens or 1
 
-    b_headers = ["Category", "Tokens", "Compact", "Share", "Relative Volume"]
+    b_headers = ["Category", "Tokens", "Compact", "Share", "Cost", "Relative Volume"]
     b_rows = []
-    for cat_name, cat_val in categories:
+    for cat_name, cat_val, cat_cost in categories:
         share = (cat_val / total_tok) * 100.0
         bar = render_bar(cat_val, max_cat, width=16)
         b_rows.append([
@@ -520,6 +536,7 @@ def cmd_session_inspect(
             f"{cat_val:,}",
             format_tokens(cat_val),
             format_percent(share),
+            format_cost(cat_cost),
             bar,
         ])
 
@@ -528,6 +545,7 @@ def cmd_session_inspect(
         Colors.bold(f"{u.total_tokens:,}"),
         Colors.bold(Colors.green(format_tokens(u.total_tokens))),
         "100.0%",
+        Colors.bold(Colors.green(format_cost(total_cost))),
         "",
     ])
     billable_share = (u.billable_tokens / total_tok) * 100.0
@@ -536,17 +554,11 @@ def cmd_session_inspect(
         Colors.bold(f"{u.billable_tokens:,}"),
         Colors.bold(Colors.yellow(format_tokens(u.billable_tokens))),
         format_percent(billable_share),
+        Colors.bold(Colors.yellow(format_cost(billable_cost))),
         "",
     ])
 
-    print(render_table(b_headers, b_rows, alignments=["left", "right", "right", "right", "left"], title="TOKEN USAGE BREAKDOWN"))
-    print()
-
-    # 3. Progression Sparkline
-    if matched.steps:
-        step_tokens = [float(st.usage.total_tokens) for st in matched.steps]
-        spark = render_sparkline(step_tokens)
-        print(f"  {Colors.bold('Progression:')} [{Colors.green(spark)}] ({len(matched.steps)} turns)")
+    print(render_table(b_headers, b_rows, alignments=["left", "right", "right", "right", "right", "left"], title="TOKEN USAGE BREAKDOWN"))
 
     # 4. Turn-by-Turn Log Table (Only if requested via --details or -n)
     should_show_turns = show_details or (turns_limit is not None)
@@ -666,11 +678,12 @@ def cmd_models(sessions: List[SessionSummary]) -> None:
 
     max_tokens = max(m.usage.total_tokens for m in models)
 
-    headers = ["Model", "Sessions", "Requests", "Prompt", "Cached", "Output", "Thoughts", "Total Tokens", "Share", "Cache %", "Volume"]
+    headers = ["Model", "Sessions", "Requests", "Prompt", "Cached", "Output", "Thoughts", "Total Tokens", "Share", "Cost", "Cache %", "Volume"]
     rows = []
     for m in models:
         mu = m.usage
         bar = render_bar(mu.total_tokens, max_tokens, width=14)
+        _, _, _, m_cost = calculate_cost(mu.prompt_tokens, mu.cached_tokens, mu.output_tokens, model_name=m.model_name)
         rows.append([
             Colors.bold(m.model_name),
             str(m.session_count),
@@ -681,12 +694,13 @@ def cmd_models(sessions: List[SessionSummary]) -> None:
             format_tokens(mu.thought_tokens),
             Colors.bold(format_tokens(mu.total_tokens)),
             f"{m.percentage_of_total:.1f}%",
+            format_cost(m_cost),
             format_percent(mu.cache_hit_rate),
             bar,
         ])
 
     print()
-    print(render_table(headers, rows, alignments=["left", "right", "right", "right", "right", "right", "right", "right", "right", "right", "left"], title="MODEL TOKEN USAGE BREAKDOWN"))
+    print(render_table(headers, rows, alignments=["left", "right", "right", "right", "right", "right", "right", "right", "right", "right", "right", "left"], title="MODEL TOKEN USAGE BREAKDOWN"))
 
 
 def cmd_live(args: argparse.Namespace) -> None:
