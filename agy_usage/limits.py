@@ -38,22 +38,22 @@ TIERS: Dict[str, TierConfig] = {
     "free": TierConfig(
         name="free",
         display_name="Google AI Free",
-        five_hour_limit=10_000_000,
-        weekly_limit=50_000_000,
+        five_hour_limit=20_000_000,
+        weekly_limit=100_000_000,
         description="Free Tier (Flash models only)",
     ),
     "pro": TierConfig(
         name="pro",
         display_name="Google AI Pro",
-        five_hour_limit=50_000_000,
-        weekly_limit=250_000_000,
+        five_hour_limit=100_000_000,
+        weekly_limit=600_000_000,
         description="Pro Tier (Default Antigravity subscription)",
     ),
     "ultra": TierConfig(
         name="ultra",
         display_name="Google AI Ultra",
-        five_hour_limit=250_000_000,
-        weekly_limit=1_000_000_000,
+        five_hour_limit=500_000_000,
+        weekly_limit=2_500_000_000,
         description="Ultra Tier (Highest quota, resilient against caps)",
     ),
 }
@@ -80,6 +80,13 @@ class WindowStats:
         if self.limit_tokens <= 0:
             return 0.0
         return (self.usage.total_tokens / self.limit_tokens) * 100.0
+
+    @property
+    def pct_remaining(self) -> float:
+        """Percentage of limit remaining."""
+        if self.limit_tokens <= 0:
+            return 0.0
+        return max(0.0, 100.0 - self.pct_used)
 
     @property
     def tokens_remaining(self) -> int:

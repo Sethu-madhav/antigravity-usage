@@ -387,8 +387,8 @@ class TestLimits(unittest.TestCase):
         self.assertEqual(w_7d.session_count, 2)
 
         # Pro limits
-        self.assertEqual(w_5h.limit_tokens, 50_000_000)
-        self.assertEqual(w_7d.limit_tokens, 250_000_000)
+        self.assertEqual(w_5h.limit_tokens, 100_000_000)
+        self.assertEqual(w_7d.limit_tokens, 600_000_000)
 
     def test_cmd_limits_rendering_and_exports(self):
         import argparse
@@ -424,9 +424,8 @@ class TestLimits(unittest.TestCase):
 
         out = buf.getvalue()
         self.assertIn("ANTIGRAVITY QUOTA & RATE LIMITS MONITOR", out)
-        self.assertIn("5-HOUR CONSUMED", out)
-        self.assertIn("5-HOUR SPRINT QUOTA", out)
-        self.assertIn("WEEKLY HARD CAP", out)
+        self.assertIn("5-HOUR REMAINING", out)
+        self.assertIn("WEEKLY REMAINING", out)
         self.assertIn("ANTIGRAVITY TIER LIMITS", out)
 
         # JSON export

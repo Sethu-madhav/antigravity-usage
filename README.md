@@ -132,9 +132,9 @@ agy-usage limits --csv
 ```
 Outputs:
 - **System Health Status Badge**: Real-time diagnostic badge (🟢 Healthy, 🟡 High Load Warning, 🔴 Limit Exceeded / Multi-day Lockout Risk).
-- **4 KPI Cards**: `5-HOUR CONSUMED`, `5-HOUR SPRINT QUOTA`, `WEEKLY CONSUMED`, `WEEKLY HARD CAP`.
-- **5-Hour Rolling Sprint Window**: Gauge bar, exact consumed vs limit, billable vs cached breakdowns, prompt cache hit rate, turn volume, and **exact countdown until oldest turns roll off and replenish capacity**.
-- **7-Day Weekly Budget Window**: Gauge bar, rolling 7-day cumulative consumption, cost, and time until oldest day clears.
+- **4 KPI Cards (Matching Official Antigravity UI)**: `5-HOUR REMAINING`, `5-HOUR REFRESH`, `WEEKLY REMAINING`, `WEEKLY REFRESH`.
+- **Five Hour Limit Remaining**: Gauge bar, exact remaining vs consumed, billable vs cached breakdowns, prompt cache hit rate, turn volume, and **exact countdown until oldest turns roll off and replenish capacity**.
+- **Weekly Limit Remaining**: Gauge bar, rolling 7-day cumulative consumption, cost, and time until oldest day clears.
 - **Antigravity Tier Limits Table**: Quick reference across Free, Pro, and Ultra tiers with active tier indicator.
 
 ### 7. Weekly Rollups (`agy-usage weekly`)
