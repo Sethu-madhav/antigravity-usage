@@ -133,9 +133,9 @@ agy-usage limits --csv
 Outputs:
 - **System Health Status Badge**: Real-time diagnostic badge (🟢 Healthy, 🟡 High Load Warning, 🔴 Limit Exceeded / Multi-day Lockout Risk).
 - **4 KPI Cards (Matching Official Antigravity UI)**: `5-HOUR REMAINING`, `5-HOUR REFRESH`, `WEEKLY REMAINING`, `WEEKLY REFRESH`.
-- **Five Hour Limit Remaining**: Gauge bar, exact remaining vs consumed, billable vs cached breakdowns, prompt cache hit rate, turn volume, and **exact countdown until oldest turns roll off and replenish capacity**.
-- **Weekly Limit Remaining**: Gauge bar, rolling 7-day cumulative consumption, cost, and time until oldest day clears.
-- **Antigravity Tier Limits Table**: Quick reference across Free, Pro, and Ultra tiers with active tier indicator.
+- **Five Hour Limit Remaining**: Gauge bar, exact remaining vs consumed, billable vs cached breakdowns, prompt cache hit rate, turn volume, and countdown until window fully refreshes.
+- **Weekly Limit Remaining**: Gauge bar, active 7-day quota cycle consumption, cost, and exact refresh countdown matching Google Antigravity (e.g. `You have used some of your weekly limit, it will fully refresh in 6 days, 16 hours.`).
+- **Antigravity Tier Limits Table**: Quick reference across Free, Pro (100M/750M), and Ultra (500M/3.75B) tiers with active tier indicator.
 
 ### 7. Weekly Rollups (`agy-usage weekly`)
 Aggregates usage by ISO week with dates and relative volume bars:

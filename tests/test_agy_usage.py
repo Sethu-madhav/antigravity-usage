@@ -6,6 +6,7 @@ from datetime import date, datetime
 from agy_usage.aggregator import UsageAggregator
 from agy_usage.display import (
     format_duration,
+    format_duration_verbose,
     format_percent,
     format_tokens,
     render_bar,
@@ -159,6 +160,10 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         self.assertEqual(format_tokens(500), "500")
         self.assertEqual(format_duration(65), "1m 5s")
         self.assertEqual(format_duration(3665), "1h 1m")
+        self.assertEqual(format_duration(576000), "6d 16h")
+        self.assertEqual(format_duration_verbose(576000), "6 days, 16 hours")
+        self.assertEqual(format_duration_verbose(3660), "1 hour, 1 minute")
+        self.assertEqual(format_duration_verbose(0), "0 minutes")
 
     def test_sparkline(self):
         spark = render_sparkline([10, 20, 50, 80, 100])
@@ -388,7 +393,9 @@ class TestLimits(unittest.TestCase):
 
         # Pro limits
         self.assertEqual(w_5h.limit_tokens, 100_000_000)
-        self.assertEqual(w_7d.limit_tokens, 600_000_000)
+        self.assertEqual(w_7d.limit_tokens, 750_000_000)
+        self.assertIsNotNone(w_7d.refresh_time)
+        self.assertEqual(w_7d.refresh_time, t_yesterday + timedelta(days=7))
 
     def test_cmd_limits_rendering_and_exports(self):
         import argparse

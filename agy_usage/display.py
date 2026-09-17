@@ -112,16 +112,39 @@ def format_cost(val: float) -> str:
 
 
 def format_duration(seconds: float) -> str:
-    """Format duration in seconds into human-readable time."""
+    """Format duration in seconds into human-readable compact time (e.g. '6d 16h', '4h 56m')."""
     if seconds <= 0:
         return "0s"
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    if d > 0:
+        return f"{d}d {h}h"
     if h > 0:
         return f"{h}h {m}m"
     if m > 0:
         return f"{m}m {s}s"
     return f"{s}s"
+
+
+def format_duration_verbose(seconds: float) -> str:
+    """Format duration in sentence style matching Google Antigravity UI (e.g. '6 days, 16 hours')."""
+    if seconds <= 0:
+        return "0 minutes"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+    parts = []
+    if d > 0:
+        parts.append(f"{d} day{'s' if d != 1 else ''}")
+    if h > 0:
+        parts.append(f"{h} hour{'s' if h != 1 else ''}")
+    if not d and m > 0:
+        parts.append(f"{m} minute{'s' if m != 1 else ''}")
+    if not d and not h and s > 0:
+        parts.append(f"{s} second{'s' if s != 1 else ''}")
+    return ", ".join(parts) if parts else "0 minutes"
+
 
 
 def render_bar(val: float, max_val: float, width: int = 20, color_func=None) -> str:

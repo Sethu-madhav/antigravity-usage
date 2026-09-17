@@ -14,6 +14,7 @@ from agy_usage.display import (
     Colors,
     format_cost,
     format_duration,
+    format_duration_verbose,
     format_percent,
     format_tokens,
     render_bar,
@@ -786,6 +787,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
             "five_hour_window": {
                 "start": w_5h.start_time.isoformat(),
                 "end": w_5h.end_time.isoformat(),
+                "refresh_at": w_5h.refresh_time.isoformat() if w_5h.refresh_time else None,
                 "total_tokens": w_5h.usage.total_tokens,
                 "cached_tokens": w_5h.usage.cached_tokens,
                 "prompt_tokens": w_5h.usage.prompt_tokens,
@@ -803,6 +805,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
             "weekly_budget": {
                 "start": w_7d.start_time.isoformat(),
                 "end": w_7d.end_time.isoformat(),
+                "refresh_at": w_7d.refresh_time.isoformat() if w_7d.refresh_time else None,
                 "total_tokens": w_7d.usage.total_tokens,
                 "cached_tokens": w_7d.usage.cached_tokens,
                 "prompt_tokens": w_7d.usage.prompt_tokens,
@@ -843,16 +846,14 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
 
     # Recovery countdowns for KPI cards
     w5_countdown = "Ready"
-    if w_5h.earliest_activity:
-        next_ref_5h = w_5h.earliest_activity + timedelta(hours=5)
-        secs_5h = (next_ref_5h - datetime.now()).total_seconds()
+    if w_5h.refresh_time and w_5h.usage.total_tokens > 0:
+        secs_5h = (w_5h.refresh_time - datetime.now()).total_seconds()
         if secs_5h > 0:
             w5_countdown = f"in {format_duration(secs_5h)}"
 
     w7_countdown = "Ready"
-    if w_7d.earliest_activity:
-        next_ref_7d = w_7d.earliest_activity + timedelta(days=7)
-        secs_7d = (next_ref_7d - datetime.now()).total_seconds()
+    if w_7d.refresh_time and w_7d.usage.total_tokens > 0:
+        secs_7d = (w_7d.refresh_time - datetime.now()).total_seconds()
         if secs_7d > 0:
             w7_countdown = f"in {format_duration(secs_7d)}"
 
@@ -894,14 +895,13 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
     print(f"  {Colors.bold('Activity Volume:')}  {w_5h.step_count} turns across {w_5h.session_count} session(s) ({format_cost(w_5h.estimated_cost)})")
 
     # Refresh countdown
-    if w_5h.earliest_activity:
-        next_refresh_at = w_5h.earliest_activity + timedelta(hours=5)
-        secs_left = (next_refresh_at - datetime.now()).total_seconds()
+    if w_5h.refresh_time and w_5h.usage.total_tokens > 0:
+        secs_left = (w_5h.refresh_time - datetime.now()).total_seconds()
         if secs_left > 0:
-            refresh_time_str = next_refresh_at.strftime("%H:%M:%S")
-            print(f"  {Colors.bold('Refresh Status:')}   {Colors.yellow(f'You have used some of your 5-hour limit, it will fully refresh in {format_duration(secs_left)}')} (at {refresh_time_str})")
+            refresh_time_str = w_5h.refresh_time.strftime("%H:%M:%S")
+            print(f"  {Colors.bold('Refresh Status:')}   {Colors.yellow(f'You have used some of your 5-hour limit, it will fully refresh in {format_duration_verbose(secs_left)}')} (at {refresh_time_str})")
         else:
-            print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('Window is currently refreshing past turns')}")
+            print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('100% capacity available (no active turns in the last 5 hours)')}")
     else:
         print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('100% capacity available (no active turns in the last 5 hours)')}")
     print()
@@ -916,13 +916,14 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
     print(f"  {Colors.bold('Tokens Consumed:')}  {format_tokens(w_7d.usage.total_tokens)} total ({format_tokens(w_7d.usage.billable_tokens)} billable, {format_tokens(w_7d.usage.cached_tokens)} cached @ {format_percent(w_7d.usage.cache_hit_rate)} hit rate)")
     print(f"  {Colors.bold('Activity Volume:')}  {w_7d.step_count} turns across {w_7d.session_count} session(s) ({format_cost(w_7d.estimated_cost)})")
 
-    if w_7d.earliest_activity:
-        weekly_reset_at = w_7d.earliest_activity + timedelta(days=7)
-        secs_left_7d = (weekly_reset_at - datetime.now()).total_seconds()
+    if w_7d.refresh_time and w_7d.usage.total_tokens > 0:
+        secs_left_7d = (w_7d.refresh_time - datetime.now()).total_seconds()
         if secs_left_7d > 0:
-            print(f"  {Colors.bold('Refresh Status:')}   {Colors.cyan(f'You have used some of your weekly limit, it will fully refresh in {format_duration(secs_left_7d)}')}")
+            print(f"  {Colors.bold('Refresh Status:')}   {Colors.cyan(f'You have used some of your weekly limit, it will fully refresh in {format_duration_verbose(secs_left_7d)}.')}")
         else:
             print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('Weekly limit is currently at full capacity')}")
+    else:
+        print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('Weekly limit is currently at full capacity (100% available)')}")
     print()
 
     # 4. Tier Comparison Table
