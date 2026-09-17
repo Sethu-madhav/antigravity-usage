@@ -57,6 +57,10 @@ class Colors:
         return cls.color(text, cls.BRIGHT_GREEN)
 
     @classmethod
+    def red(cls, text: str) -> str:
+        return cls.color(text, cls.RED)
+
+    @classmethod
     def cyan(cls, text: str) -> str:
         return cls.color(text, cls.BRIGHT_CYAN)
 

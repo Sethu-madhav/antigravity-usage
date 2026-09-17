@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from agy_usage import __version__
@@ -23,6 +23,13 @@ from agy_usage.display import (
 )
 from agy_usage.exporter import UsageExporter
 from agy_usage.heatmap import TerminalHeatmap
+from agy_usage.limits import (
+    TIERS,
+    LimitsCalculator,
+    get_status_badge,
+    parse_token_amount,
+    render_gauge_bar,
+)
 from agy_usage.models import SessionSummary, calculate_cost
 from agy_usage.parser import AntigravityParser
 
@@ -35,11 +42,12 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         epilog="""
 Examples:
   agy-usage                       Show summary dashboard & mini heatmap
-  agy-usage current               Show token usage & turns for the most recent session
+  agy-usage current               Show token usage & totals for the most recent session
+  agy-usage limits                Show current 5-hour limit and weekly quota limits
   agy-usage heatmap               Show full GitHub-style contribution heatmap
   agy-usage heatmap --metric cached  Heatmap colored by cached tokens
   agy-usage sessions              List recent conversation sessions and token stats
-  agy-usage session <id>          Inspect turn-by-turn token usage for a session
+  agy-usage session <id>          Inspect token usage totals for a session
   agy-usage weekly                Show weekly aggregated usage table & bar chart
   agy-usage monthly               Show monthly aggregated usage table & bar chart
   agy-usage models                Show token breakdown by model
@@ -207,6 +215,34 @@ Examples:
         type=int,
         default=3,
         help="Refresh interval in seconds (default: 3)",
+    )
+
+    # 9. limits
+    sub_limits = subparsers.add_parser(
+        "limits", help="Show current 5-hour rolling limit and weekly quota limits"
+    )
+    sub_limits.add_argument(
+        "--tier",
+        choices=["pro", "ultra", "free"],
+        default="pro",
+        help="Antigravity subscription plan tier (default: pro)",
+    )
+    sub_limits.add_argument(
+        "--5h-limit",
+        "--five-hour-limit",
+        dest="five_h_limit",
+        help="Custom 5-hour limit in tokens (e.g. 50M, 100M)",
+    )
+    sub_limits.add_argument(
+        "--weekly-limit",
+        dest="weekly_limit",
+        help="Custom weekly limit in tokens (e.g. 250M, 1B)",
+    )
+    sub_limits.add_argument(
+        "--json", action="store_true", help="Output limits analysis as JSON"
+    )
+    sub_limits.add_argument(
+        "--csv", action="store_true", help="Output limits analysis as CSV"
     )
 
     return parser.parse_args(args)
@@ -726,6 +762,169 @@ def cmd_live(args: argparse.Namespace) -> None:
         print(Colors.dim("Live monitor stopped."))
 
 
+def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
+    """Display 5-hour rolling limit and weekly quota limits."""
+    tier = getattr(args, "tier", "pro") or "pro"
+    custom_5h = parse_token_amount(getattr(args, "five_h_limit", None))
+    custom_weekly = parse_token_amount(getattr(args, "weekly_limit", None))
+
+    w_5h, w_7d, tier_cfg = LimitsCalculator.compute(
+        sessions, tier_name=tier, five_h_limit=custom_5h, weekly_limit=custom_weekly
+    )
+
+    badge, status_msg = get_status_badge(w_5h, w_7d)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # JSON export support
+    if getattr(args, "json", False):
+        import json
+        payload = {
+            "tier": tier_cfg.name,
+            "checked_at": now_str,
+            "status": badge,
+            "five_hour_window": {
+                "start": w_5h.start_time.isoformat(),
+                "end": w_5h.end_time.isoformat(),
+                "total_tokens": w_5h.usage.total_tokens,
+                "cached_tokens": w_5h.usage.cached_tokens,
+                "prompt_tokens": w_5h.usage.prompt_tokens,
+                "output_tokens": w_5h.usage.output_tokens,
+                "billable_tokens": w_5h.usage.billable_tokens,
+                "cache_hit_rate": round(w_5h.usage.cache_hit_rate, 2),
+                "limit_tokens": w_5h.limit_tokens,
+                "pct_used": round(w_5h.pct_used, 2),
+                "tokens_remaining": w_5h.tokens_remaining,
+                "estimated_cost_usd": round(w_5h.estimated_cost, 4),
+                "turns": w_5h.step_count,
+                "sessions": w_5h.session_count,
+            },
+            "weekly_budget": {
+                "start": w_7d.start_time.isoformat(),
+                "end": w_7d.end_time.isoformat(),
+                "total_tokens": w_7d.usage.total_tokens,
+                "cached_tokens": w_7d.usage.cached_tokens,
+                "prompt_tokens": w_7d.usage.prompt_tokens,
+                "output_tokens": w_7d.usage.output_tokens,
+                "billable_tokens": w_7d.usage.billable_tokens,
+                "cache_hit_rate": round(w_7d.usage.cache_hit_rate, 2),
+                "limit_tokens": w_7d.limit_tokens,
+                "pct_used": round(w_7d.pct_used, 2),
+                "tokens_remaining": w_7d.tokens_remaining,
+                "estimated_cost_usd": round(w_7d.estimated_cost, 4),
+                "turns": w_7d.step_count,
+                "sessions": w_7d.session_count,
+            },
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    # CSV export support
+    if getattr(args, "csv", False):
+        import csv
+        import io
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["Window", "Total Tokens", "Cached Tokens", "Billable Tokens", "Limit Tokens", "Pct Used", "Tokens Remaining", "Est Cost USD", "Turns", "Sessions"])
+        writer.writerow(["5-Hour Sprint", w_5h.usage.total_tokens, w_5h.usage.cached_tokens, w_5h.usage.billable_tokens, w_5h.limit_tokens, f"{w_5h.pct_used:.2f}%", w_5h.tokens_remaining, f"{w_5h.estimated_cost:.4f}", w_5h.step_count, w_5h.session_count])
+        writer.writerow(["Weekly Cap", w_7d.usage.total_tokens, w_7d.usage.cached_tokens, w_7d.usage.billable_tokens, w_7d.limit_tokens, f"{w_7d.pct_used:.2f}%", w_7d.tokens_remaining, f"{w_7d.estimated_cost:.4f}", w_7d.step_count, w_7d.session_count])
+        print(buf.getvalue().strip())
+        return
+
+    print()
+    print(Colors.bold(Colors.cyan("── ANTIGRAVITY QUOTA & RATE LIMITS MONITOR " + "─" * 38)))
+    print(f"  {Colors.bold('Subscription:')}   {tier_cfg.display_name} ({tier_cfg.description})")
+    print(f"  {Colors.bold('Checked At:')}     {now_str}")
+    print(f"  {Colors.bold('System Status:')}  {badge} {status_msg}")
+    print()
+
+    # 1. KPI Cards
+    card1 = (
+        "5-HOUR CONSUMED",
+        Colors.bold(Colors.green(format_tokens(w_5h.usage.total_tokens))),
+        f"{format_cost(w_5h.estimated_cost)} ({format_tokens(w_5h.usage.billable_tokens)} billable)",
+    )
+    card2 = (
+        "5-HOUR SPRINT QUOTA",
+        Colors.bold(format_percent(w_5h.pct_used)),
+        f"{format_tokens(w_5h.tokens_remaining)} tokens remaining",
+    )
+    card3 = (
+        "WEEKLY CONSUMED",
+        Colors.bold(Colors.green(format_tokens(w_7d.usage.total_tokens))),
+        f"{format_cost(w_7d.estimated_cost)} ({format_tokens(w_7d.usage.billable_tokens)} billable)",
+    )
+    card4 = (
+        "WEEKLY HARD CAP",
+        Colors.bold(format_percent(w_7d.pct_used)),
+        f"{format_tokens(w_7d.tokens_remaining)} tokens remaining",
+    )
+    print(render_kpi_grid([card1, card2, card3, card4]))
+    print()
+
+    # 2. 5-Hour Rolling Sprint Details
+    print(Colors.bold(Colors.cyan("── 5-HOUR ROLLING SPRINT WINDOW (Last 5 Hours) " + "─" * 33)))
+    w5_start = w_5h.start_time.strftime("%Y-%m-%d %H:%M:%S")
+    w5_end = w_5h.end_time.strftime("%H:%M:%S")
+    bar_5h = render_gauge_bar(w_5h.pct_used, width=24)
+    print(f"  {Colors.bold('Window Span:')}      {w5_start} → {w5_end}")
+    print(f"  {Colors.bold('Capacity Used:')}    {bar_5h} {format_percent(w_5h.pct_used)} ({format_tokens(w_5h.usage.total_tokens)} / {format_tokens(w_5h.limit_tokens)})")
+    print(f"  {Colors.bold('Billable Tokens:')}  {format_tokens(w_5h.usage.billable_tokens)} (Prompt: {format_tokens(w_5h.usage.prompt_tokens)}, Output: {format_tokens(w_5h.usage.output_tokens)})")
+    print(f"  {Colors.bold('Cached Tokens:')}    {format_tokens(w_5h.usage.cached_tokens)} ({format_percent(w_5h.usage.cache_hit_rate)} prompt hit rate)")
+    print(f"  {Colors.bold('Activity Volume:')}  {w_5h.step_count} turns across {w_5h.session_count} session(s) ({format_cost(w_5h.estimated_cost)})")
+
+    # Refresh countdown
+    if w_5h.earliest_activity:
+        next_refresh_at = w_5h.earliest_activity + timedelta(hours=5)
+        secs_left = (next_refresh_at - datetime.now()).total_seconds()
+        if secs_left > 0:
+            refresh_time_str = next_refresh_at.strftime("%H:%M:%S")
+            print(f"  {Colors.bold('Window Recovery:')}  {Colors.yellow(f'Earliest turn rolls off in {format_duration(secs_left)}')} (at {refresh_time_str})")
+        else:
+            print(f"  {Colors.bold('Window Recovery:')}  {Colors.green('Window is currently refreshing past turns')}")
+    else:
+        print(f"  {Colors.bold('Window Recovery:')}  {Colors.green('No active turns in the last 5 hours (100% capacity available)')}")
+    print()
+
+    # 3. 7-Day Rolling Weekly Budget
+    print(Colors.bold(Colors.cyan("── 7-DAY ROLLING WEEKLY BUDGET (Weekly Baseline Cap) " + "─" * 27)))
+    w7_start = w_7d.start_time.strftime("%Y-%m-%d %H:%M:%S")
+    w7_end = w_7d.end_time.strftime("%H:%M:%S")
+    bar_7d = render_gauge_bar(w_7d.pct_used, width=24)
+    print(f"  {Colors.bold('Budget Span:')}      {w7_start} → {w7_end}")
+    print(f"  {Colors.bold('Capacity Used:')}    {bar_7d} {format_percent(w_7d.pct_used)} ({format_tokens(w_7d.usage.total_tokens)} / {format_tokens(w_7d.limit_tokens)})")
+    print(f"  {Colors.bold('Billable Tokens:')}  {format_tokens(w_7d.usage.billable_tokens)} (Prompt: {format_tokens(w_7d.usage.prompt_tokens)}, Output: {format_tokens(w_7d.usage.output_tokens)})")
+    print(f"  {Colors.bold('Cached Tokens:')}    {format_tokens(w_7d.usage.cached_tokens)} ({format_percent(w_7d.usage.cache_hit_rate)} prompt hit rate)")
+    print(f"  {Colors.bold('Activity Volume:')}  {w_7d.step_count} turns across {w_7d.session_count} session(s) ({format_cost(w_7d.estimated_cost)})")
+
+    if w_7d.earliest_activity:
+        weekly_reset_at = w_7d.earliest_activity + timedelta(days=7)
+        secs_left_7d = (weekly_reset_at - datetime.now()).total_seconds()
+        if secs_left_7d > 0:
+            print(f"  {Colors.bold('Weekly Refresh:')}   {Colors.cyan(f'Oldest day clears in {format_duration(secs_left_7d)}')}")
+        else:
+            print(f"  {Colors.bold('Weekly Refresh:')}   {Colors.green('Weekly buffer is currently clear')}")
+    print()
+
+    # 4. Tier Comparison Table
+    t_headers = ["Tier", "5-Hour Cap", "Weekly Cap", "Models Supported", "Status"]
+    t_rows = []
+    for k, t_item in TIERS.items():
+        is_active = (k == tier_cfg.name)
+        status_cell = Colors.bold(Colors.green("● ACTIVE")) if is_active else Colors.dim("Available")
+        t_rows.append([
+            Colors.bold(t_item.name.upper()),
+            format_tokens(t_item.five_hour_limit),
+            format_tokens(t_item.weekly_limit),
+            "Flash only" if k == "free" else ("Flash + Pro" if k == "pro" else "All Models"),
+            status_cell,
+        ])
+    print(render_table(t_headers, t_rows, alignments=["left", "right", "right", "left", "center"], title="ANTIGRAVITY TIER LIMITS"))
+    print()
+    print(Colors.dim("💡 Tip: The 5-hour limit refreshes rolling sprint capacity every 5 hours."))
+    print(Colors.dim("   If you hit the weekly hard cap, Google locks out the agent until the 7-day cycle clears."))
+    print(Colors.dim("   Use lighter Flash models and plan-first agent prompts to maximize quota efficiency."))
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Entry point for CLI execution."""
     args = parse_args(argv)
@@ -735,8 +934,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         Colors.enabled = classmethod(lambda cls: False)
 
     sessions = get_sessions(args)
+    sub = args.subcommand
 
-    # Handle export options
+    # Subcommand: limits handles its own JSON/CSV
+    if sub == "limits":
+        cmd_limits(sessions, args)
+        return 0
+
+    # Handle global export options for other commands
     if args.json:
         UsageExporter.export(sessions, format_type="json")
         return 0
@@ -744,7 +949,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         UsageExporter.export(sessions, format_type="csv")
         return 0
 
-    sub = args.subcommand
     if sub is None or sub == "overview":
         cmd_overview(sessions, args)
     elif sub == "heatmap":

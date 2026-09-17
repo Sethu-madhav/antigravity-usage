@@ -90,7 +90,7 @@ agy-usage sessions --workspace mongo
 ### 4. Inspect Current Session Totals (`agy-usage current`)
 Immediately inspects your active/most recent conversation totals without turn-by-turn clutter:
 ```bash
-# Show current session totals (KPI cards, breakdown table, progression sparkline)
+# Show current session totals (KPI cards, breakdown table, cost analysis)
 agy-usage current
 
 # Optionally show turn-by-turn logs for the last 10 turns (or -n 0 for all turns)
@@ -113,25 +113,49 @@ Outputs:
 - Token Usage Breakdown table with exact counts, compact suffixes, share percentages, estimated USD cost, and relative volume bars
 - Optional turn-by-turn log table (when `--details` or `-n <count>` is passed)
 
-### 6. Weekly Rollups (`agy-usage weekly`)
+### 6. Quota & Rate Limits Monitor (`agy-usage limits`)
+Monitors your active **5-Hour Rolling Sprint Limit** and **7-Day Weekly Baseline Hard Cap** in real-time to prevent unexpected model lockouts:
+```bash
+# Display 5-hour and weekly limits for default Pro subscription
+agy-usage limits
+
+# Check limits under Ultra tier or Free tier
+agy-usage limits --tier ultra
+agy-usage limits --tier free
+
+# Set custom capacity limits (supports K, M, B suffixes)
+agy-usage limits --5h-limit 80M --weekly-limit 500M
+
+# Export limits analysis to JSON or CSV
+agy-usage limits --json
+agy-usage limits --csv
+```
+Outputs:
+- **System Health Status Badge**: Real-time diagnostic badge (🟢 Healthy, 🟡 High Load Warning, 🔴 Limit Exceeded / Multi-day Lockout Risk).
+- **4 KPI Cards**: `5-HOUR CONSUMED`, `5-HOUR SPRINT QUOTA`, `WEEKLY CONSUMED`, `WEEKLY HARD CAP`.
+- **5-Hour Rolling Sprint Window**: Gauge bar, exact consumed vs limit, billable vs cached breakdowns, prompt cache hit rate, turn volume, and **exact countdown until oldest turns roll off and replenish capacity**.
+- **7-Day Weekly Budget Window**: Gauge bar, rolling 7-day cumulative consumption, cost, and time until oldest day clears.
+- **Antigravity Tier Limits Table**: Quick reference across Free, Pro, and Ultra tiers with active tier indicator.
+
+### 7. Weekly Rollups (`agy-usage weekly`)
 Aggregates usage by ISO week with dates and relative volume bars:
 ```bash
 agy-usage weekly
 ```
 
-### 6. Monthly Rollups (`agy-usage monthly`)
+### 8. Monthly Rollups (`agy-usage monthly`)
 Aggregates usage by calendar month:
 ```bash
 agy-usage monthly
 ```
 
-### 7. Model Distribution (`agy-usage models`)
+### 9. Model Distribution (`agy-usage models`)
 Breakdown of token volume and percentage share per model:
 ```bash
 agy-usage models
 ```
 
-### 8. Live Watch Mode (`agy-usage live`)
+### 10. Live Watch Mode (`agy-usage live`)
 Auto-refreshes the dashboard in real-time as Antigravity executes prompts:
 ```bash
 agy-usage live --interval 2

@@ -270,5 +270,192 @@ class TestSessionInspect(unittest.TestCase):
         self.assertEqual(format_cost(0.0), "$0.00")
 
 
+class TestLimits(unittest.TestCase):
+    def test_parse_token_amount(self):
+        from agy_usage.limits import parse_token_amount
+        self.assertEqual(parse_token_amount("50M"), 50_000_000)
+        self.assertEqual(parse_token_amount("1B"), 1_000_000_000)
+        self.assertEqual(parse_token_amount("250k"), 250_000)
+        self.assertEqual(parse_token_amount("1.5M"), 1_500_000)
+        self.assertIsNone(parse_token_amount(None))
+        self.assertIsNone(parse_token_amount(""))
+        self.assertIsNone(parse_token_amount("invalid"))
+
+    def test_render_gauge_bar(self):
+        from agy_usage.limits import render_gauge_bar
+        from agy_usage.display import strip_ansi
+        bar_low = render_gauge_bar(20.0, width=10)
+        self.assertIn("██", strip_ansi(bar_low))
+        self.assertEqual(len(strip_ansi(bar_low)), 12)  # 10 chars + [ ]
+
+        bar_mid = render_gauge_bar(70.0, width=10)
+        self.assertIn("███████", strip_ansi(bar_mid))
+
+        bar_high = render_gauge_bar(95.0, width=10)
+        self.assertIn("██████████", strip_ansi(bar_high))
+
+    def test_get_status_badge(self):
+        from agy_usage.limits import WindowStats, get_status_badge
+        now = datetime.now()
+        
+        def make_stats(tokens, limit):
+            return WindowStats(
+                window_name="test",
+                start_time=now,
+                end_time=now,
+                usage=TokenUsage(prompt_tokens=tokens),
+                step_count=1,
+                session_count=1,
+                limit_tokens=limit,
+                estimated_cost=0.0,
+            )
+
+        # Healthy
+        b, _ = get_status_badge(make_stats(10, 100), make_stats(10, 100))
+        self.assertEqual(b, "🟢")
+
+        # High load (>80%)
+        b, _ = get_status_badge(make_stats(85, 100), make_stats(20, 100))
+        self.assertEqual(b, "🟡")
+
+        # 5h exceeded (>=100%)
+        b, _ = get_status_badge(make_stats(100, 100), make_stats(20, 100))
+        self.assertEqual(b, "🔴")
+
+        # Weekly exceeded (>=100%)
+        b, _ = get_status_badge(make_stats(20, 100), make_stats(100, 100))
+        self.assertEqual(b, "🔴")
+
+    def test_limits_calculator(self):
+        from datetime import timedelta
+        from agy_usage.limits import LimitsCalculator
+
+        ref_time = datetime(2026, 9, 17, 12, 0)
+        t_recent = ref_time - timedelta(hours=2)      # in 5h and 7d
+        t_yesterday = ref_time - timedelta(days=2)   # outside 5h, inside 7d
+        t_old = ref_time - timedelta(days=10)        # outside 7d
+
+        s_recent = SessionSummary(
+            session_id="s-recent",
+            source="cli",
+            file_path="/tmp/sr.db",
+            title="Recent",
+            workspace="ws",
+            models=["gemini-3.8-flash"],
+            start_time=t_recent,
+            end_time=t_recent,
+            step_count=1,
+            usage=TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200),
+            steps=[StepRecord(step_idx=1, timestamp=t_recent, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200))]
+        )
+        s_mid = SessionSummary(
+            session_id="s-mid",
+            source="cli",
+            file_path="/tmp/sm.db",
+            title="Mid",
+            workspace="ws",
+            models=["gemini-3.8-flash"],
+            start_time=t_yesterday,
+            end_time=t_yesterday,
+            step_count=1,
+            usage=TokenUsage(prompt_tokens=2000, cached_tokens=8000, output_tokens=400),
+            steps=[StepRecord(step_idx=1, timestamp=t_yesterday, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=2000, cached_tokens=8000, output_tokens=400))]
+        )
+        s_old = SessionSummary(
+            session_id="s-old",
+            source="cli",
+            file_path="/tmp/so.db",
+            title="Old",
+            workspace="ws",
+            models=["gemini-3.8-flash"],
+            start_time=t_old,
+            end_time=t_old,
+            step_count=1,
+            usage=TokenUsage(prompt_tokens=5000, cached_tokens=10000, output_tokens=1000),
+            steps=[StepRecord(step_idx=1, timestamp=t_old, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=5000, cached_tokens=10000, output_tokens=1000))]
+        )
+
+        w_5h, w_7d, tier = LimitsCalculator.compute([s_recent, s_mid, s_old], tier_name="pro", now=ref_time)
+        # 5h should only include s_recent (total: 5200 tokens)
+        self.assertEqual(w_5h.usage.total_tokens, 5200)
+        self.assertEqual(w_5h.step_count, 1)
+        self.assertEqual(w_5h.session_count, 1)
+
+        # 7d should include s_recent + s_mid (5200 + 10400 = 15600 tokens)
+        self.assertEqual(w_7d.usage.total_tokens, 15600)
+        self.assertEqual(w_7d.step_count, 2)
+        self.assertEqual(w_7d.session_count, 2)
+
+        # Pro limits
+        self.assertEqual(w_5h.limit_tokens, 50_000_000)
+        self.assertEqual(w_7d.limit_tokens, 250_000_000)
+
+    def test_cmd_limits_rendering_and_exports(self):
+        import argparse
+        import io
+        import json
+        import sys
+        from agy_usage.cli import cmd_limits
+
+        t = datetime.now()
+        session = SessionSummary(
+            session_id="s-limits",
+            source="cli",
+            file_path="/tmp/sl.db",
+            title="Limits Test",
+            workspace="ws",
+            models=["gemini-3.8-flash"],
+            start_time=t,
+            end_time=t,
+            step_count=1,
+            usage=TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200),
+            steps=[StepRecord(step_idx=1, timestamp=t, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200))]
+        )
+
+        # Terminal render
+        args = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, json=False, csv=False)
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            cmd_limits([session], args)
+        finally:
+            sys.stdout = old_stdout
+
+        out = buf.getvalue()
+        self.assertIn("ANTIGRAVITY QUOTA & RATE LIMITS MONITOR", out)
+        self.assertIn("5-HOUR CONSUMED", out)
+        self.assertIn("5-HOUR SPRINT QUOTA", out)
+        self.assertIn("WEEKLY HARD CAP", out)
+        self.assertIn("ANTIGRAVITY TIER LIMITS", out)
+
+        # JSON export
+        args_json = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, json=True, csv=False)
+        buf_json = io.StringIO()
+        try:
+            sys.stdout = buf_json
+            cmd_limits([session], args_json)
+        finally:
+            sys.stdout = old_stdout
+
+        data = json.loads(buf_json.getvalue())
+        self.assertIn("five_hour_window", data)
+        self.assertIn("weekly_budget", data)
+        self.assertEqual(data["tier"], "pro")
+
+        # CSV export
+        args_csv = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, json=False, csv=True)
+        buf_csv = io.StringIO()
+        try:
+            sys.stdout = buf_csv
+            cmd_limits([session], args_csv)
+        finally:
+            sys.stdout = old_stdout
+
+        csv_out = buf_csv.getvalue()
+        self.assertIn("5-Hour Sprint", csv_out)
+        self.assertIn("Weekly Cap", csv_out)
+
+
 if __name__ == "__main__":
     unittest.main()
