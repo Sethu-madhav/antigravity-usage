@@ -137,25 +137,71 @@ Outputs:
 - **Weekly Limit Remaining**: Gauge bar, active 7-day quota cycle consumption, cost, and exact refresh countdown matching Google Antigravity (e.g. `You have used some of your weekly limit, it will fully refresh in 6 days, 16 hours.`).
 - **Antigravity Tier Limits Table**: Quick reference across Free, Pro (100M/750M), and Ultra (500M/3.75B) tiers with active tier indicator.
 
-### 7. Weekly Rollups (`agy-usage weekly`)
+### 7. Shell & Tmux Statusline (`agy-usage statusline`)
+Ultra-fast (<70ms), single-line quota and health snapshot designed for shell prompts (`zsh`, `bash`, `starship`) and `tmux` status bars:
+```bash
+# Default colored statusline (with emoji badge, recovery countdowns, today's spend)
+agy-usage statusline
+# Output: 🟢 5h: 97% (in 4h 59m) | Wk: 91% (in 6d 1h) | Today: 68.85M ($11.80)
+
+# Ultra-compact minimal format for tight prompts
+agy-usage statusline --short
+# Output: 🟢 5h:97% Wk:91% $11.80
+
+# Plain text without ANSI colors or emojis
+agy-usage statusline --plain
+# Output: [OK] 5h: 97% (in 4h 59m) | Wk: 91% (in 6d 1h) | Today: 68.85M ($11.80)
+
+# Native tmux statusline formatting
+agy-usage statusline --tmux
+# Output: #[fg=green]● #[fg=white]5h: 97% #[fg=colour244](in 4h 59m) #[fg=colour238]| #[fg=white]Wk: 91% #[fg=colour244](in 6d 1h) #[fg=colour238]| #[fg=white]Today: 68.85M #[fg=green]($11.80)
+
+# JSON metrics for Starship, Waybar, or Polybar integrations
+agy-usage statusline --json
+
+# Custom template string format
+agy-usage statusline --format "{status} [5h: {5h_pct}%] [Wk: {wk_pct}%] Spent: {today_cost}"
+# Output: 🟢 [5h: 97%] [Wk: 91%] Spent: $11.80
+```
+
+#### Quick Integration Snippets:
+* **tmux (`~/.tmux.conf`)**:
+  ```tmux
+  set -g status-interval 60
+  set -g status-right '#(agy-usage statusline --tmux)'
+  ```
+* **zsh (`~/.zshrc`)**:
+  ```zsh
+  RPROMPT='$(agy-usage statusline --short)'
+  ```
+* **Starship (`~/.config/starship.toml`)**:
+  ```toml
+  [custom.agy]
+  command = "agy-usage statusline --short"
+  when = "command -v agy-usage >/dev/null"
+  shell = ["sh"]
+  style = "bold green"
+  ```
+
+### 8. Weekly Rollups (`agy-usage weekly`)
 Aggregates usage by ISO week with dates and relative volume bars:
 ```bash
 agy-usage weekly
 ```
 
-### 8. Monthly Rollups (`agy-usage monthly`)
+### 9. Monthly Rollups (`agy-usage monthly`)
 Aggregates usage by calendar month:
 ```bash
 agy-usage monthly
 ```
 
-### 9. Model Distribution (`agy-usage models`)
+### 10. Model Distribution (`agy-usage models`)
 Breakdown of token volume and percentage share per model:
 ```bash
 agy-usage models
 ```
 
-### 10. Live Watch Mode (`agy-usage live`)
+### 11. Live Watch Mode (`agy-usage live`)
 Auto-refreshes the dashboard in real-time as Antigravity executes prompts:
 ```bash
 agy-usage live --interval 2

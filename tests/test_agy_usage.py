@@ -462,6 +462,105 @@ class TestLimits(unittest.TestCase):
         self.assertIn("5-Hour Sprint", csv_out)
         self.assertIn("Weekly Cap", csv_out)
 
+    def test_cmd_statusline_formatting_and_exports(self):
+        import argparse
+        import io
+        import json
+        import sys
+        from agy_usage.cli import cmd_statusline
+
+        t = datetime.now()
+        session = SessionSummary(
+            session_id="s-status",
+            source="cli",
+            file_path="/tmp/ss.db",
+            title="Statusline Test",
+            workspace="ws",
+            models=["gemini-3.8-flash"],
+            start_time=t,
+            end_time=t,
+            step_count=1,
+            usage=TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200),
+            steps=[StepRecord(step_idx=1, timestamp=t, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200))]
+        )
+
+        old_stdout = sys.stdout
+
+        # 1. Default ANSI
+        args_def = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=False, format=None, no_color=False)
+        buf = io.StringIO()
+        try:
+            sys.stdout = buf
+            cmd_statusline([session], args_def)
+        finally:
+            sys.stdout = old_stdout
+        out = buf.getvalue().strip()
+        self.assertIn("5h:", out)
+        self.assertIn("Wk:", out)
+        self.assertIn("Today:", out)
+
+        # 2. Short
+        args_short = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=True, plain=False, tmux=False, json=False, format=None, no_color=False)
+        buf_s = io.StringIO()
+        try:
+            sys.stdout = buf_s
+            cmd_statusline([session], args_short)
+        finally:
+            sys.stdout = old_stdout
+        out_s = buf_s.getvalue().strip()
+        self.assertIn("5h:", out_s)
+        self.assertIn("Wk:", out_s)
+
+        # 3. Plain
+        args_plain = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=True, tmux=False, json=False, format=None, no_color=False)
+        buf_p = io.StringIO()
+        try:
+            sys.stdout = buf_p
+            cmd_statusline([session], args_plain)
+        finally:
+            sys.stdout = old_stdout
+        out_p = buf_p.getvalue().strip()
+        self.assertIn("[OK]", out_p)
+        self.assertIn("5h:", out_p)
+
+        # 4. Tmux
+        args_tmux = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=True, json=False, format=None, no_color=False)
+        buf_t = io.StringIO()
+        try:
+            sys.stdout = buf_t
+            cmd_statusline([session], args_tmux)
+        finally:
+            sys.stdout = old_stdout
+        out_t = buf_t.getvalue().strip()
+        self.assertIn("#[fg=", out_t)
+        self.assertIn("5h:", out_t)
+
+        # 5. JSON
+        args_json = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False)
+        buf_j = io.StringIO()
+        try:
+            sys.stdout = buf_j
+            cmd_statusline([session], args_json)
+        finally:
+            sys.stdout = old_stdout
+        data = json.loads(buf_j.getvalue())
+        self.assertEqual(data["status"], "healthy")
+        self.assertIn("five_hour_pct", data)
+        self.assertIn("weekly_pct", data)
+        self.assertIn("today_cost_usd", data)
+
+        # 6. Format template
+        args_fmt = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=False, format="{status} 5h:{5h_pct}% | Wk:{wk_pct}%", no_color=False)
+        buf_f = io.StringIO()
+        try:
+            sys.stdout = buf_f
+            cmd_statusline([session], args_fmt)
+        finally:
+            sys.stdout = old_stdout
+        out_f = buf_f.getvalue().strip()
+        self.assertIn("5h:100%", out_f)
+        self.assertIn("Wk:100%", out_f)
+
 
 if __name__ == "__main__":
     unittest.main()

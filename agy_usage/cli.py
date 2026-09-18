@@ -246,6 +246,54 @@ Examples:
         "--csv", action="store_true", help="Output limits analysis as CSV"
     )
 
+    # 10. statusline
+    sub_statusline = subparsers.add_parser(
+        "statusline", help="Compact single-line quota status for shell prompt or tmux"
+    )
+    sub_statusline.add_argument(
+        "--tier",
+        choices=["pro", "ultra", "free"],
+        default="pro",
+        help="Antigravity subscription plan tier (default: pro)",
+    )
+    sub_statusline.add_argument(
+        "--5h-limit",
+        "--five-hour-limit",
+        dest="five_h_limit",
+        help="Custom 5-hour limit in tokens (e.g. 50M, 100M)",
+    )
+    sub_statusline.add_argument(
+        "--weekly-limit",
+        dest="weekly_limit",
+        help="Custom weekly limit in tokens (e.g. 250M, 1B)",
+    )
+    sub_statusline.add_argument(
+        "-s",
+        "--short",
+        action="store_true",
+        help="Ultra-compact minimal format (e.g. '🟢 5h:99%% Wk:91%% $11.47')",
+    )
+    sub_statusline.add_argument(
+        "--plain",
+        action="store_true",
+        help="Plain text output without ANSI color codes or emojis",
+    )
+    sub_statusline.add_argument(
+        "--tmux",
+        action="store_true",
+        help="Format output using tmux color formatting directives (#[fg=...])",
+    )
+    sub_statusline.add_argument(
+        "--json",
+        action="store_true",
+        help="Output statusline metrics as JSON (ideal for Waybar/Polybar/Starship)",
+    )
+    sub_statusline.add_argument(
+        "-f",
+        "--format",
+        help="Custom template format string (e.g. '{status} 5h:{5h_pct}%% | Wk:{wk_pct}%% | {today_cost}')",
+    )
+
     return parser.parse_args(args)
 
 
@@ -946,6 +994,138 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
     print(Colors.dim("   Use lighter Flash models and plan-first agent prompts to maximize quota efficiency."))
 
 
+def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
+    """Display compact single-line quota status for shell prompt, tmux, or status bars."""
+    tier = getattr(args, "tier", "pro") or "pro"
+    custom_5h = parse_token_amount(getattr(args, "five_h_limit", None))
+    custom_weekly = parse_token_amount(getattr(args, "weekly_limit", None))
+
+    w_5h, w_7d, tier_cfg = LimitsCalculator.compute(
+        sessions, tier_name=tier, five_h_limit=custom_5h, weekly_limit=custom_weekly
+    )
+
+    now = datetime.now()
+    s5 = (w_5h.refresh_time - now).total_seconds() if (w_5h.refresh_time and w_5h.usage.total_tokens > 0) else 0
+    rec_5h = f"in {format_duration(s5)}" if s5 > 0 else "Ready"
+
+    s7 = (w_7d.refresh_time - now).total_seconds() if (w_7d.refresh_time and w_7d.usage.total_tokens > 0) else 0
+    rec_7d = f"in {format_duration(s7)}" if s7 > 0 else "Ready"
+
+    rem_5h = round(w_5h.pct_remaining)
+    rem_7d = round(w_7d.pct_remaining)
+
+    # Today's consumption
+    daily = UsageAggregator.aggregate_daily(sessions)
+    today_usage = daily.get(now.date())
+    if today_usage:
+        tok_today = today_usage.usage.total_tokens
+        _, _, _, cost_today = calculate_cost(
+            today_usage.usage.prompt_tokens,
+            today_usage.usage.cached_tokens,
+            today_usage.usage.output_tokens,
+        )
+    else:
+        tok_today = 0
+        cost_today = 0.0
+
+    tok_today_str = format_tokens(tok_today)
+    cost_today_str = format_cost(cost_today)
+
+    # Health status level & badge
+    if rem_5h <= 0 or rem_7d <= 0 or w_5h.is_exceeded or w_7d.is_exceeded:
+        badge = "🔴"
+        badge_plain = "[ALERT]"
+        level = "critical"
+        color_5h = Colors.red
+        color_7d = Colors.red
+        tmux_color = "red"
+    elif rem_5h < 20 or rem_7d < 20:
+        badge = "🟡"
+        badge_plain = "[WARN]"
+        level = "warning"
+        color_5h = Colors.yellow if rem_5h < 20 else Colors.green
+        color_7d = Colors.yellow if rem_7d < 20 else Colors.green
+        tmux_color = "yellow"
+    else:
+        badge = "🟢"
+        badge_plain = "[OK]"
+        level = "healthy"
+        color_5h = Colors.green
+        color_7d = Colors.green
+        tmux_color = "green"
+
+    # JSON export
+    if getattr(args, "json", False):
+        import json
+        payload = {
+            "status": level,
+            "badge": badge,
+            "tier": tier_cfg.name,
+            "five_hour_pct": rem_5h,
+            "five_hour_refresh": rec_5h,
+            "five_hour_used_tokens": w_5h.usage.total_tokens,
+            "five_hour_limit_tokens": w_5h.limit_tokens,
+            "weekly_pct": rem_7d,
+            "weekly_refresh": rec_7d,
+            "weekly_used_tokens": w_7d.usage.total_tokens,
+            "weekly_limit_tokens": w_7d.limit_tokens,
+            "today_tokens": tok_today,
+            "today_tokens_str": tok_today_str,
+            "today_cost_usd": round(cost_today, 4),
+            "today_cost_str": cost_today_str,
+        }
+        print(json.dumps(payload, indent=2))
+        return
+
+    # Custom template format
+    custom_format = getattr(args, "format", None)
+    if custom_format:
+        res = custom_format
+        replacements = {
+            "{status}": badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge,
+            "{badge}": badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge,
+            "{5h_pct}": f"{rem_5h}",
+            "{5h_refresh}": rec_5h,
+            "{wk_pct}": f"{rem_7d}",
+            "{wk_refresh}": rec_7d,
+            "{today_tokens}": tok_today_str,
+            "{today_cost}": cost_today_str,
+            "{tier}": tier_cfg.name,
+        }
+        for k, v in replacements.items():
+            res = res.replace(k, str(v))
+        print(res)
+        return
+
+    # Tmux mode
+    if getattr(args, "tmux", False):
+        print(
+            f"#[fg={tmux_color}]● #[fg=white]5h: {rem_5h}% #[fg=colour244]({rec_5h}) "
+            f"#[fg=colour238]| #[fg=white]Wk: {rem_7d}% #[fg=colour244]({rec_7d}) "
+            f"#[fg=colour238]| #[fg=white]Today: {tok_today_str} #[fg=green]({cost_today_str})"
+        )
+        return
+
+    # Plain mode (no colors or emojis)
+    is_plain = getattr(args, "plain", False) or not Colors.enabled() or getattr(args, "no_color", False)
+    if is_plain:
+        if getattr(args, "short", False):
+            print(f"{badge_plain} 5h:{rem_5h}% Wk:{rem_7d}% {cost_today_str}")
+        else:
+            print(f"{badge_plain} 5h: {rem_5h}% ({rec_5h}) | Wk: {rem_7d}% ({rec_7d}) | Today: {tok_today_str} ({cost_today_str})")
+        return
+
+    # Default ANSI Colored mode
+    if getattr(args, "short", False):
+        print(f"{badge} {color_5h(f'5h:{rem_5h}%')} {color_7d(f'Wk:{rem_7d}%')} {Colors.green(cost_today_str)}")
+    else:
+        print(
+            f"{badge} {color_5h('5h:')} {color_5h(f'{rem_5h}%')} {Colors.dim(f'({rec_5h})')} | "
+            f"{color_7d('Wk:')} {color_7d(f'{rem_7d}%')} {Colors.dim(f'({rec_7d})')} | "
+            f"Today: {tok_today_str} {Colors.green(f'({cost_today_str})')}"
+        )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Entry point for CLI execution."""
     args = parse_args(argv)
@@ -957,9 +1137,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     sessions = get_sessions(args)
     sub = args.subcommand
 
-    # Subcommand: limits handles its own JSON/CSV
+    # Subcommands that handle their own formatting and exports
     if sub == "limits":
         cmd_limits(sessions, args)
+        return 0
+    elif sub == "statusline":
+        cmd_statusline(sessions, args)
         return 0
 
     # Handle global export options for other commands
