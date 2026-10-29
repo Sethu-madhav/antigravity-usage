@@ -114,6 +114,27 @@ class UsageExporter:
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(content)
         else:
-            sys.stdout.write(content)
-            if not content.endswith("\n"):
-                sys.stdout.write("\n")
+            UsageExporter._write_stdout(content)
+
+    @staticmethod
+    def _write_stdout(content: str) -> None:
+        """Write text to stdout without crashing on non-console-encodable characters."""
+        stream = sys.stdout
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        text = content if content.endswith("\n") else f"{content}\n"
+        try:
+            stream.write(text)
+        except UnicodeEncodeError:
+            encoding = getattr(stream, "encoding", None) or "ascii"
+            safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+            try:
+                stream.write(safe_text)
+            except UnicodeEncodeError:
+                ascii_text = text.encode("ascii", errors="replace").decode("ascii", errors="replace")
+                stream.write(ascii_text)
