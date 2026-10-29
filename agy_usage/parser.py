@@ -254,12 +254,56 @@ class AntigravityParser:
 
     @classmethod
     def parse_session_db(cls, db_path: str, source: str = "cli") -> Optional[SessionSummary]:
-        """Extract complete usage, steps, title, and metadata from a single SQLite DB."""
+        """Extract complete usage, steps, title, and metadata from a single SQLite DB.
+
+        Parsing is defensive (BUG-008): once the DB is validated, a lock or a
+        single malformed step row keeps everything read so far and returns a
+        partial summary, so one bad tick cannot drop the session from `live`.
+        """
         if not os.path.isfile(db_path):
             return None
 
         filename = os.path.basename(db_path)
         session_id = filename.replace(".db", "")
+
+        # Parsed state lives outside the try so any failure below can still be
+        # reported as a partial summary instead of discarding prior work.
+        workspace = "Unknown"
+        title = f"Session {session_id[:8]}"
+        known_models: Set[str] = set()
+        step_to_model: Dict[int, str] = {}
+        default_model = "gemini-3.8-flash"
+        steps: List[StepRecord] = []
+        aggregated_usage = TokenUsage()
+        model_token_totals: Dict[str, int] = {}
+        first_ts: Optional[datetime] = None
+        last_ts: Optional[datetime] = None
+        validated = False
+
+        def build_summary() -> SessionSummary:
+            """Assemble a summary from everything parsed so far."""
+            # Order models by token volume descending so primary_model
+            # (models[0]) is the dominant model of the session.
+            if known_models:
+                models_list = sorted(
+                    known_models,
+                    key=lambda m: (-model_token_totals.get(m, 0), m),
+                )
+            else:
+                models_list = [default_model]
+            return SessionSummary(
+                session_id=session_id,
+                source=source,
+                file_path=db_path,
+                title=title,
+                workspace=workspace,
+                models=models_list,
+                start_time=first_ts,
+                end_time=last_ts or first_ts,
+                step_count=len(steps),
+                usage=aggregated_usage,
+                steps=steps,
+            )
 
         conn: Optional[sqlite3.Connection] = None
         try:
@@ -278,9 +322,9 @@ class AntigravityParser:
             tables = {row[0] for row in cursor.fetchall()}
             if "steps" not in tables:
                 return None
+            validated = True
 
             # 1. Extract Workspace / Project from trajectory_metadata_blob
-            workspace = "Unknown"
             start_time_blob: Optional[datetime] = None
             if "trajectory_metadata_blob" in tables:
                 try:
@@ -310,8 +354,6 @@ class AntigravityParser:
                     pass
 
             # 2. Extract Models and Step-to-Model Mapping from gen_metadata
-            step_to_model: Dict[int, str] = {}
-            known_models: Set[str] = set()
             enum_to_model: Dict[int, str] = dict(KNOWN_MODEL_ENUMS)
             gm_rows: List[Tuple[int, str, Optional[int]]] = []
             if "gen_metadata" in tables:
@@ -447,110 +489,108 @@ class AntigravityParser:
                 pass
 
             # 4. Extract Step Records and Token Usage
-            steps: List[StepRecord] = []
-            aggregated_usage = TokenUsage()
-            model_token_totals: Dict[str, int] = {}
-            first_ts: Optional[datetime] = start_time_blob
-            last_ts: Optional[datetime] = None
-
-            cursor.execute(
-                "SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC"
-            )
-            for idx, meta_blob in cursor.fetchall():
-                if not meta_blob:
-                    continue
-                meta_fields = parse_proto_fields(meta_blob)
-                meta_map: Dict[int, bytes | int] = {
-                    f: v for f, w, v in meta_fields
-                }
-
-                # Check for UsageMetadata in Field 9
-                usage_raw = meta_map.get(9)
-                if not isinstance(usage_raw, bytes):
-                    continue
-
-                step_usage = parse_usage_proto(usage_raw)
-                # Ignore empty usage steps
-                if step_usage.total_tokens == 0:
-                    continue
-
-                # Extract Step Timestamp from Field 1, 6, 7, 8, or 32
-                step_ts: Optional[datetime] = None
-                for ts_field_id in (1, 6, 7, 8, 32):
-                    ts_raw = meta_map.get(ts_field_id)
-                    if isinstance(ts_raw, bytes):
-                        ts = parse_timestamp_proto(ts_raw)
-                        if ts:
-                            step_ts = ts
-                            break
-
-                if not step_ts:
-                    # Fallback to DB file modification time
-                    step_ts = datetime.fromtimestamp(os.path.getmtime(db_path))
-
-                if first_ts is None or step_ts < first_ts:
-                    first_ts = step_ts
-                if last_ts is None or step_ts > last_ts:
-                    last_ts = step_ts
-
-                # Identify Model for this step:
-                # 1) Direct gen_metadata last_step_index anchor
-                # 2) UsageMetadata field 1 model_enum integer
-                # 3) Most recent preceding gen_metadata anchor in this session
-                # 4) Session default model
-                step_model = step_to_model.get(idx, "")
-                if not step_model:
-                    u_enum = extract_usage_model_enum(usage_raw)
-                    if u_enum is not None and u_enum in enum_to_model:
-                        step_model = enum_to_model[u_enum]
-                if not step_model and gm_anchors:
-                    for anchor_idx, anchor_model in reversed(gm_anchors):
-                        if anchor_idx <= idx:
-                            step_model = anchor_model
-                            break
-                if not step_model:
-                    step_model = default_model
-
-                known_models.add(step_model)
-                model_token_totals[step_model] = (
-                    model_token_totals.get(step_model, 0) + step_usage.total_tokens
+            first_ts = start_time_blob
+            try:
+                cursor.execute(
+                    "SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC"
                 )
+                step_rows = cursor.fetchall()
+            except sqlite3.OperationalError:
+                # Locked/vanished mid-read: keep title, workspace and any steps
+                # already collected instead of dropping the whole session.
+                step_rows = []
 
-                step_rec = StepRecord(
-                    step_idx=idx,
-                    timestamp=step_ts,
-                    model=step_model,
-                    usage=step_usage,
+            try:
+                db_mtime: Optional[datetime] = datetime.fromtimestamp(
+                    os.path.getmtime(db_path)
                 )
-                steps.append(step_rec)
-                aggregated_usage = aggregated_usage.add(step_usage)
+            except OSError:
+                db_mtime = None
 
-            # Assemble session summary — order models by token volume descending so
-            # primary_model (models[0]) is the dominant model of the session.
-            if known_models:
-                models_list = sorted(
-                    known_models,
-                    key=lambda m: (-model_token_totals.get(m, 0), m),
-                )
-            else:
-                models_list = [default_model]
-            summary = SessionSummary(
-                session_id=session_id,
-                source=source,
-                file_path=db_path,
-                title=title,
-                workspace=workspace,
-                models=models_list,
-                start_time=first_ts,
-                end_time=last_ts or first_ts,
-                step_count=len(steps),
-                usage=aggregated_usage,
-                steps=steps,
-            )
-            return summary
+            for idx, meta_blob in step_rows:
+                try:
+                    if not meta_blob:
+                        continue
+                    meta_fields = parse_proto_fields(meta_blob)
+                    meta_map: Dict[int, bytes | int] = {
+                        f: v for f, w, v in meta_fields
+                    }
 
-        except Exception as e:
-            # Return graceful partial summary if available or None
+                    # Check for UsageMetadata in Field 9
+                    usage_raw = meta_map.get(9)
+                    if not isinstance(usage_raw, bytes):
+                        continue
+
+                    step_usage = parse_usage_proto(usage_raw)
+                    # Ignore empty usage steps
+                    if step_usage.total_tokens == 0:
+                        continue
+
+                    # Extract Step Timestamp from Field 1, 6, 7, 8, or 32
+                    step_ts: Optional[datetime] = None
+                    for ts_field_id in (1, 6, 7, 8, 32):
+                        ts_raw = meta_map.get(ts_field_id)
+                        if isinstance(ts_raw, bytes):
+                            ts = parse_timestamp_proto(ts_raw)
+                            if ts:
+                                step_ts = ts
+                                break
+
+                    if not step_ts:
+                        # Fallback to DB file modification time
+                        step_ts = db_mtime
+                    if not step_ts:
+                        continue
+
+                    if first_ts is None or step_ts < first_ts:
+                        first_ts = step_ts
+                    if last_ts is None or step_ts > last_ts:
+                        last_ts = step_ts
+
+                    # Identify Model for this step:
+                    # 1) Direct gen_metadata last_step_index anchor
+                    # 2) UsageMetadata field 1 model_enum integer
+                    # 3) Most recent preceding gen_metadata anchor in this session
+                    # 4) Session default model
+                    step_model = step_to_model.get(idx, "")
+                    if not step_model:
+                        u_enum = extract_usage_model_enum(usage_raw)
+                        if u_enum is not None and u_enum in enum_to_model:
+                            step_model = enum_to_model[u_enum]
+                    if not step_model and gm_anchors:
+                        for anchor_idx, anchor_model in reversed(gm_anchors):
+                            if anchor_idx <= idx:
+                                step_model = anchor_model
+                                break
+                    if not step_model:
+                        step_model = default_model
+
+                    known_models.add(step_model)
+                    model_token_totals[step_model] = (
+                        model_token_totals.get(step_model, 0) + step_usage.total_tokens
+                    )
+
+                    step_rec = StepRecord(
+                        step_idx=idx,
+                        timestamp=step_ts,
+                        model=step_model,
+                        usage=step_usage,
+                    )
+                    steps.append(step_rec)
+                    aggregated_usage = aggregated_usage.add(step_usage)
+                except Exception:
+                    # One malformed row must not discard the rest of the session
+                    continue
+
+            return build_summary()
+
+        except sqlite3.OperationalError:
+            # Transient SQLite failure (e.g. "database is locked"): emit what we
+            # have so the session stays visible, unless the DB was never
+            # validated as a usable session at all.
+            return build_summary() if validated else None
+        except Exception:
+            # Unknown failure: preserve the previous skip-the-session behavior.
             return None
         finally:
             if conn:
