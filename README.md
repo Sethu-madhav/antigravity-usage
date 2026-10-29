@@ -61,7 +61,7 @@ agy-usage heatmap
 # Show active dates list below heatmap
 agy-usage heatmap --details
 
-# Display 52-week annual heatmap
+# Display 52-week annual heatmap (-w is clamped to 4-52 weeks; a warning is printed if the terminal is narrower than the grid)
 agy-usage heatmap -w 52
 
 # Color heatmap by CACHED tokens to inspect cache efficiency over time
@@ -131,7 +131,8 @@ agy-usage limits --json
 agy-usage limits --csv
 ```
 Outputs:
-- **System Health Status Badge**: Real-time diagnostic badge (🟢 Healthy, 🟡 High Load Warning, 🔴 Limit Exceeded / Multi-day Lockout Risk).
+- **System Health Status Badge**: Real-time diagnostic badge (🟢 Healthy, 🟡 High Load Warning, 🔴 Limit Exceeded / Multi-day Lockout Risk, ⚪ Unknown when the quota cannot be determined). `limits` and `statusline` use the same thresholds (warn at 60% used, high at 80%).
+- **Quota Source Line**: Shows where the numbers came from: live Antigravity server, `Last server reading, N min ago (Antigravity server not reachable now)` (the last cached server reading, used for up to 6 hours), or `Local estimate, this device only`. If the server cannot be reached and this device has no usage in a window, that window is reported as unknown (`?` in text, `null` in JSON, empty CSV cells) instead of 100% remaining, with the reason the server call failed. `--json` adds `quota_source`, `cache_fetched_at` and `cache_age_seconds`.
 - **4 KPI Cards (Matching Official Antigravity UI)**: `5-HOUR REMAINING`, `5-HOUR REFRESH`, `WEEKLY REMAINING`, `WEEKLY REFRESH`.
 - **Five Hour Limit Remaining**: Gauge bar, exact remaining vs consumed, billable vs cached breakdowns, prompt cache hit rate, turn volume, and countdown until window fully refreshes.
 - **Weekly Limit Remaining**: Gauge bar, active 7-day quota cycle consumption, cost, and exact refresh countdown matching Google Antigravity (e.g. `You have used some of your weekly limit, it will fully refresh in 6 days, 16 hours.`).
@@ -158,6 +159,9 @@ agy-usage statusline --tmux
 
 # JSON metrics for Starship, Waybar, or Polybar integrations
 agy-usage statusline --json
+
+# One-row CSV (header + data row, same fields as --json) for spreadsheets or logging
+agy-usage statusline --csv
 
 # Custom template string format
 agy-usage statusline --format "{status} [5h: {5h_pct}%] [Wk: {wk_pct}%] Spent: {today_cost}"
@@ -205,7 +209,11 @@ agy-usage models
 Auto-refreshes the dashboard in real-time as Antigravity executes prompts:
 ```bash
 agy-usage live --interval 2
+
+# Stream one compact JSON object per refresh (NDJSON), no banner or screen clearing
+agy-usage live --json --interval 5
 ```
+`--csv` is not supported by `live` (error on stderr, exit code 2).
 
 ---
 
@@ -223,9 +231,10 @@ agy-usage --cli-only
 # Scan Antigravity IDE conversations only
 agy-usage --ide-only
 
-# Scan a custom directory only
+# Scan a custom directory only (sessions are ordered by start time, newest first, like the default scan)
 agy-usage --dir /path/to/custom/conversations
 ```
+A session present in both the CLI and IDE directories is counted once (the copy with the newest modification time wins).
 
 ---
 
@@ -266,10 +275,11 @@ All reads are executed using SQLite URI read-only mode (`file:<path>?mode=ro`), 
 
 ## 🧪 Testing
 
-Run the unit test suite:
+Run the unit test suite (stdlib `unittest`; `pytest -q` also works):
 ```bash
 python3 -m unittest discover tests
 ```
+Tests live in `tests/`, one `test_<topic>.py` file per area. See `AGENTS.md` for how to add tests.
 
 ---
 

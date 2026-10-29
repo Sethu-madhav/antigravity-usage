@@ -1,6 +1,6 @@
 # Optimizations — agy-usage
 
-Performance ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `a2904b2`, dated 2026-10-28; current baseline `cda76f5`.
+Performance ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `a2904b2`, dated 2026-10-28; current baseline `bd79c54` (PRs #1-#25 merged, 150 tests passing).
 
 > **Status legend:** ⬜ Open · 🔧 In progress · ✅ Done · ❌ Won't do
 > **Severity:** 🔴 High · 🟠 Med · 🟡 Low
@@ -32,6 +32,6 @@ Performance ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `
 ## Suggested order
 
 1. **Micro PR:** OPT-004 + OPT-003 (simple, testable, no behavior change)
-2. **Cache PR:** OPT-001, touching `parser.py` plus a new `agy_usage/cache.py`; carry BUG-005's TTL discipline for the quota cache through the same review
+2. **Cache PR:** OPT-001, touching `parser.py` plus a new `agy_usage/cache.py`; carry the quota-cache rules through the same review (BUG-005's "never labeled Live" and reset-time checks, as relaxed by PR #24: a cache up to 6 h old is shown as a dated reading)
 3. **Live rework:** OPT-002
 4. **Sweep:** OPT-005 through OPT-008 in one "parser micro-optimizations" PR with before/after timings in the body
