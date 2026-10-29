@@ -169,9 +169,13 @@ def normalize_model_name(model_name: str) -> str:
     Groups ``gemini-3.8-flash``, ``gemini-3.8-flash-control``, ``gemini-3.8-n``,
     and ``gemini-3.8-flash-n`` (as well as low/medium/high/tiered suffixes)
     under ``gemini-3.8-flash``.
+
+    An empty (or whitespace-only) name is *unresolvable* and normalizes to
+    ``''`` — returning the hardcoded default here used to fabricate phantom
+    ``gemini-3.8-flash`` model entries with zero token evidence (BUG-010).
     """
     if not model_name:
-        return "gemini-3.8-flash"
+        return ""
     m = model_name.strip()
     m_low = m.lower()
     if m_low in (
