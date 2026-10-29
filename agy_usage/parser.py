@@ -13,8 +13,17 @@ from urllib.parse import quote
 from agy_usage.models import SessionSummary, StepRecord, TokenUsage, normalize_model_name
 
 
+_MAX_VARINT_BYTES = 10
+_U64_MASK = (1 << 64) - 1
+
+
 def decode_varint(data: bytes, idx: int) -> Tuple[int, int]:
-    """Decode a variable-length integer (varint) starting at index."""
+    """Decode a variable-length integer (varint) starting at index.
+
+    A varint is at most 10 bytes (64 bits). A longer continuation run is
+    corruption: it raises ValueError instead of decoding to an unbounded int
+    that would flow into the aggregates (BUG-017). The value is masked to 64 bits.
+    """
     val = 0
     shift = 0
     while idx < len(data):
@@ -24,7 +33,9 @@ def decode_varint(data: bytes, idx: int) -> Tuple[int, int]:
         shift += 7
         if not (b & 0x80):
             break
-    return val, idx
+        if shift >= _MAX_VARINT_BYTES * 7:
+            raise ValueError("varint longer than 10 bytes")
+    return val & _U64_MASK, idx
 
 
 def parse_proto_fields(data: bytes) -> List[Tuple[int, int, bytes | int]]:
@@ -32,30 +43,35 @@ def parse_proto_fields(data: bytes) -> List[Tuple[int, int, bytes | int]]:
     idx = 0
     fields: List[Tuple[int, int, bytes | int]] = []
     length_data = len(data)
-    while idx < length_data:
-        tag, idx = decode_varint(data, idx)
-        wire_type = tag & 7
-        field_num = tag >> 3
+    try:
+        while idx < length_data:
+            tag, idx = decode_varint(data, idx)
+            wire_type = tag & 7
+            field_num = tag >> 3
 
-        if wire_type == 0:  # Varint
-            val, idx = decode_varint(data, idx)
-            fields.append((field_num, wire_type, val))
-        elif wire_type == 1:  # 64-bit
-            val = data[idx : idx + 8]
-            idx += 8
-            fields.append((field_num, wire_type, val))
-        elif wire_type == 2:  # Length-delimited (string, bytes, embedded message)
-            str_len, idx = decode_varint(data, idx)
-            val = data[idx : idx + str_len]
-            idx += str_len
-            fields.append((field_num, wire_type, val))
-        elif wire_type == 5:  # 32-bit
-            val = data[idx : idx + 4]
-            idx += 4
-            fields.append((field_num, wire_type, val))
-        else:
-            # Unknown wire type or corruption; stop parsing
-            break
+            if wire_type == 0:  # Varint
+                val, idx = decode_varint(data, idx)
+                fields.append((field_num, wire_type, val))
+            elif wire_type == 1:  # 64-bit
+                val = data[idx : idx + 8]
+                idx += 8
+                fields.append((field_num, wire_type, val))
+            elif wire_type == 2:  # Length-delimited (string, bytes, embedded message)
+                str_len, idx = decode_varint(data, idx)
+                val = data[idx : idx + str_len]
+                idx += str_len
+                fields.append((field_num, wire_type, val))
+            elif wire_type == 5:  # 32-bit
+                val = data[idx : idx + 4]
+                idx += 4
+                fields.append((field_num, wire_type, val))
+            else:
+                # Unknown wire type or corruption; stop parsing
+                break
+    except ValueError:
+        # Overlong varint (BUG-017): same policy as unknown wire types — keep the
+        # fields that parsed cleanly and stop at the corruption.
+        pass
     return fields
 
 
@@ -187,6 +203,14 @@ def parse_usage_proto(data: bytes) -> TokenUsage:
     return usage
 
 
+def _mtime_or_zero(path: str) -> float:
+    """File mtime for sort keys; 0.0 (oldest) if the file vanished mid-scan (BUG-016)."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 class AntigravityParser:
     """Parser to discover and extract Antigravity conversation databases."""
 
@@ -213,7 +237,7 @@ class AntigravityParser:
 
         db_files = sorted(
             glob.glob(os.path.join(dir_path, "*.db")),
-            key=lambda p: os.path.getmtime(p),
+            key=_mtime_or_zero,
             reverse=True,
         )
 
@@ -243,14 +267,32 @@ class AntigravityParser:
         for d_path, s_label in cls.get_default_directories(mode=source_mode):
             all_sessions.extend(cls.scan_directory(d_path, source=s_label))
 
+        all_sessions = cls._dedupe_by_session_id(all_sessions)
+
         # Sort all sessions descending by start_time (or file mtime if start_time is missing)
         all_sessions.sort(
             key=lambda s: s.start_time.timestamp()
             if s.start_time
-            else os.path.getmtime(s.file_path),
+            else _mtime_or_zero(s.file_path),
             reverse=True,
         )
         return all_sessions
+
+    @staticmethod
+    def _dedupe_by_session_id(sessions: List[SessionSummary]) -> List[SessionSummary]:
+        """Keep one summary per session_id (BUG-015).
+
+        The same conversation DB can exist in both the CLI and IDE directories;
+        summing both copies double-counts its tokens while session counts (which
+        key on session_id) stay correct. The copy with the newest file mtime wins;
+        on an exact tie the first one scanned (CLI before IDE) is kept.
+        """
+        by_id: Dict[str, SessionSummary] = {}
+        for session in sessions:
+            kept = by_id.get(session.session_id)
+            if kept is None or _mtime_or_zero(session.file_path) > _mtime_or_zero(kept.file_path):
+                by_id[session.session_id] = session
+        return list(by_id.values())
 
     @classmethod
     def parse_session_db(cls, db_path: str, source: str = "cli") -> Optional[SessionSummary]:
