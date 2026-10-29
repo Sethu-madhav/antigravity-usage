@@ -1262,6 +1262,58 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         print(json.dumps(payload, indent=2))
         return
 
+    # CSV export
+    if getattr(args, "csv", False):
+        import csv
+        import io
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        headers = [
+            "status",
+            "badge",
+            "tier",
+            "five_hour_pct",
+            "five_hour_refresh",
+            "five_hour_used_tokens",
+            "five_hour_limit_tokens",
+            "weekly_pct",
+            "weekly_refresh",
+            "weekly_used_tokens",
+            "weekly_limit_tokens",
+            "argon_weekly_pct",
+            "argon_weekly_refresh",
+            "argon_weekly_used_tokens",
+            "argon_weekly_limit_tokens",
+            "today_tokens",
+            "today_tokens_str",
+            "today_cost_usd",
+            "today_cost_str",
+        ]
+        writer.writerow(headers)
+        writer.writerow([
+            level,
+            badge,
+            tier_cfg.name,
+            rem_5h,
+            rec_5h,
+            w_5h.usage.total_tokens,
+            w_5h.limit_tokens,
+            rem_7d,
+            rec_7d,
+            w_7d.usage.total_tokens,
+            w_7d.limit_tokens,
+            rem_argon,
+            rec_argon,
+            argon_7d.usage.total_tokens,
+            argon_7d.limit_tokens,
+            tok_today,
+            tok_today_str,
+            round(cost_today, 4),
+            cost_today_str,
+        ])
+        print(buf.getvalue().strip())
+        return
+
     # Custom template format
     custom_format = getattr(args, "format", None)
     if custom_format:
