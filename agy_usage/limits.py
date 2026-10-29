@@ -153,6 +153,22 @@ class WindowStats:
     cost_limit_usd: Optional[float] = None
     server_remaining_fraction: Optional[float] = None
     server_description: Optional[str] = None
+    server_unreachable: bool = False
+
+    @property
+    def is_unknown(self) -> bool:
+        """Whether nothing is known about this window's quota.
+
+        True when the live server could not be reached, no server fraction was
+        supplied, and this device's history has no usage in the window. Usage
+        from other devices only shows up through the server, so ``pct_remaining``
+        (100%) would be a guess, not a measurement.
+        """
+        return (
+            self.server_unreachable
+            and self.server_remaining_fraction is None
+            and self.usage.total_tokens <= 0
+        )
 
     @property
     def pct_used(self) -> float:
@@ -228,6 +244,7 @@ class MultiPoolLimits:
     claude_5h: WindowStats
     claude_7d: WindowStats
     live_synced: bool = False
+    live_error: Optional[str] = None
 
 
 def parse_token_amount(text: Optional[str]) -> Optional[int]:
@@ -321,23 +338,37 @@ _QUOTA_CACHE_PATH = os.path.expanduser(
 _QUOTA_CACHE_TTL_SECONDS = 60.0
 
 
-def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]:
+def fetch_live_quota_summary(
+    use_cache: bool = True, errors: Optional[List[str]] = None
+) -> Optional[Dict[str, Any]]:
     """Query the local Antigravity language_server for authoritative quota buckets.
 
     Calls ``RetrieveUserQuotaSummary`` and ``GetUserStatus`` on the localhost port
     of the running Antigravity ``language_server`` process (if active), falling back
     to the last cached response on disk only while it is fresh (BUG-005: a cache
     older than ~60s is rejected so it is never rendered as live server data).
+
+    When ``errors`` is a list, a short reason is appended for each step that
+    failed, so callers can tell the user why live data is missing.
     """
+
+    def _note(reason: str) -> None:
+        if errors is not None:
+            errors.append(reason)
+
+    ps_ok = True
     try:
         ps_out = subprocess.check_output(
             ["ps", "-axo", "pid=,command="],
             stderr=subprocess.DEVNULL,
             timeout=1.5,
         ).decode("utf-8", errors="ignore")
-    except Exception:
+    except Exception as exc:
         ps_out = ""
+        ps_ok = False
+        _note(f"could not list processes ({exc.__class__.__name__})")
 
+    found_server = False
     for line in ps_out.splitlines():
         if "language_server" not in line or "--csrf_token" not in line:
             continue
@@ -349,6 +380,7 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
         if not m_csrf:
             continue
         csrf = m_csrf.group(1)
+        found_server = True
 
         try:
             lsof_out = subprocess.check_output(
@@ -356,7 +388,8 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
                 stderr=subprocess.DEVNULL,
                 timeout=1.5,
             ).decode("utf-8", errors="ignore")
-        except Exception:
+        except Exception as exc:
+            _note(f"could not list ports of language_server pid {pid} ({exc.__class__.__name__})")
             continue
 
         ports: List[int] = []
@@ -364,6 +397,8 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
             m_port = re.search(r"127\.0\.0\.1:(\d+)\s+\(LISTEN\)", lline)
             if m_port:
                 ports.append(int(m_port.group(1)))
+        if not ports:
+            _note(f"language_server pid {pid} is not listening on 127.0.0.1")
 
         for port in sorted(ports):
             base_url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService"
@@ -382,6 +417,7 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
                 with urllib.request.urlopen(req, timeout=1.2) as resp:
                     quota_data = json.loads(resp.read().decode("utf-8"))
                 if "response" not in quota_data or "groups" not in quota_data["response"]:
+                    _note(f"port {port}: response has no quota groups")
                     continue
 
                 buckets: Dict[str, Dict[str, Any]] = {}
@@ -428,8 +464,12 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
                 except Exception:
                     pass
                 return result
-            except Exception:
+            except Exception as exc:
+                _note(f"port {port}: {str(exc)[:80] or exc.__class__.__name__}")
                 continue
+
+    if ps_ok and not found_server:
+        _note("no running Antigravity language_server found")
 
     if use_cache and os.path.isfile(_QUOTA_CACHE_PATH):
         try:
@@ -437,12 +477,11 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
                 cached = json.load(fp)
             if isinstance(cached, dict) and "buckets" in cached:
                 fetched_at = _parse_fetched_at(cached.get("fetched_at"))
-                if (
-                    fetched_at is not None
-                    and datetime.now(timezone.utc) - fetched_at
-                    <= timedelta(seconds=_QUOTA_CACHE_TTL_SECONDS)
-                ):
-                    return cached
+                if fetched_at is not None:
+                    age = datetime.now(timezone.utc) - fetched_at
+                    if age <= timedelta(seconds=_QUOTA_CACHE_TTL_SECONDS):
+                        return cached
+                    _note(f"cached server reading is {int(age.total_seconds() // 60)} min old")
         except Exception:
             pass
     return None
@@ -720,14 +759,20 @@ class LimitsCalculator:
 
         # Automatically query the live local Antigravity language_server when running
         # against real on-disk sessions (disabled automatically for synthetic unit tests).
+        # A device with no local history still asks: its quota may have been spent
+        # on another device, which only the server knows about.
         if use_live_server is None:
-            use_live_server = any(
+            use_live_server = not sessions or any(
                 bool(s.file_path and os.path.isfile(s.file_path)) for s in sessions
             )
 
-        live_data = fetch_live_quota_summary() if use_live_server else None
+        live_errors: List[str] = []
+        live_data = fetch_live_quota_summary(errors=live_errors) if use_live_server else None
         live_buckets = (live_data or {}).get("buckets", {}) if live_data else {}
         live_synced = bool(live_buckets)
+        live_error: Optional[str] = None
+        if use_live_server and not live_synced:
+            live_error = "; ".join(live_errors) or "server returned no quota buckets"
 
         # 1. Gemini Flash / Pro Pool
         gemini_items = LimitsCalculator._collect_pool_items(sessions, pool="gemini")
@@ -843,6 +888,10 @@ class LimitsCalculator:
                 c7_custom,
             )
 
+        if live_error is not None:
+            for w in (gemini_5h, gemini_7d, argon_7d, claude_5h, claude_7d):
+                w.server_unreachable = True
+
         return MultiPoolLimits(
             tier=tier,
             gemini_5h=gemini_5h,
@@ -851,6 +900,7 @@ class LimitsCalculator:
             claude_5h=claude_5h,
             claude_7d=claude_7d,
             live_synced=live_synced,
+            live_error=live_error,
         )
 
 
@@ -929,4 +979,8 @@ def get_status_badge(
         )
     if any(w.pct_used >= WARN_MODERATE for w in all_windows):
         return "🟡", Colors.yellow("MODERATE LOAD (Active window consumption, steady pace)")
+    if any(w.is_unknown and w.limit_tokens > 0 for w in all_windows):
+        return "⚪", Colors.yellow(
+            "UNKNOWN (Antigravity server not reachable, and this device has no usage in some quota windows)"
+        )
     return "🟢", Colors.green("HEALTHY (All sprint and weekly quotas are well within safe thresholds)")
