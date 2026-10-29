@@ -46,11 +46,20 @@ class Colors:
 
     @classmethod
     def enabled(cls) -> bool:
+        """Auto-detect color support: TTY-gated, NO_COLOR-aware (BUG-009).
+
+        Enablement is decided ONLY by this method: colors turn on when stdout
+        is a real terminal and NO_COLOR is not set. COLORTERM must never flip
+        enablement here — a piped stdout (file, pipe, CI capture) with
+        COLORTERM exported by the parent shell (VS Code, Warp) stays plain.
+        COLORTERM's legitimate role is depth selection only, consulted by
+        HeatmapColor.supports_truecolor() to pick truecolor vs 256-color.
+        """
         if _COLOR_OVERRIDE is not None:
             return _COLOR_OVERRIDE
         if os.environ.get("NO_COLOR"):
             return False
-        return sys.stdout.isatty() or os.environ.get("COLORTERM") is not None
+        return sys.stdout.isatty()
 
     @classmethod
     def color(cls, text: str, code: str) -> str:
@@ -104,14 +113,30 @@ def format_tokens(num: int, compact: bool = True) -> str:
     return f"{num:,}"
 
 
-def format_percent(val: float) -> str:
-    """Format a percentage value with color coding."""
+def format_percent(val: float, high_is_good: bool = True) -> str:
+    """Format a percentage value with color coding.
+
+    The color meaning depends on the semantics of the value (BUG-011):
+
+    - high_is_good=True (default): green >=75%, yellow >=40%, gray below 40%.
+      Correct for *remaining* quota and rates like cache hit rate, where a
+      high fraction is healthy.
+    - high_is_good=False: the value is *used* quota, where a high fraction is
+      bad — red >=75%, yellow >=40%, green below 40%.
+    """
     pct_str = f"{val:.1f}%"
+    if high_is_good:
+        if val >= 75.0:
+            return Colors.green(pct_str)
+        elif val >= 40.0:
+            return Colors.yellow(pct_str)
+        return Colors.gray(pct_str)
+    # Used-percent semantics: high consumption is bad.
     if val >= 75.0:
-        return Colors.green(pct_str)
+        return Colors.red(pct_str)
     elif val >= 40.0:
         return Colors.yellow(pct_str)
-    return Colors.gray(pct_str)
+    return Colors.green(pct_str)
 
 
 def format_cost(val: float) -> str:

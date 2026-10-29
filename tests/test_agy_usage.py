@@ -262,10 +262,13 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         with mock.patch("sys.stdout.isatty", return_value=True):
             with mock.patch.dict(os.environ, {**bare_env, "NO_COLOR": "1"}, clear=True):
                 self.assertFalse(Colors.enabled())
-        # COLORTERM still upgrades piped stdout (pre-BUG-009 behavior preserved).
+        # COLORTERM no longer enables color for piped stdout (BUG-009):
+        # even exported by the parent shell (VS Code, Warp, CI), it must not
+        # flip enablement — enablement is TTY + NO_COLOR only.
         with mock.patch("sys.stdout.isatty", return_value=False):
             with mock.patch.dict(os.environ, {**bare_env, "COLORTERM": "truecolor"}, clear=True):
-                self.assertTrue(Colors.enabled())
+                self.assertFalse(Colors.enabled())
+                self.assertFalse(HeatmapColor.supports_color())
 
     def test_main_no_color_wires_global_switch(self):
         """BUG-004: cli.main() applies --no-color to the shared switch and cmd_heatmap
@@ -310,6 +313,33 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         self.assertEqual(format_duration_verbose(3660), "1 hour, 1 minute")
         self.assertEqual(format_duration_verbose(0), "0 minutes")
 
+    def test_format_percent_remaining_semantics_unchanged(self):
+        # BUG-011 regression guard: *remaining* callers keep today's thresholds
+        # (green >=75, yellow >=40, gray below) — default and explicit kwarg.
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+        self.assertEqual(format_percent(92.0), Colors.green("92.0%"))
+        self.assertEqual(format_percent(100.0), Colors.green("100.0%"))
+        self.assertEqual(format_percent(75.0), Colors.green("75.0%"))
+        self.assertEqual(format_percent(74.9), Colors.yellow("74.9%"))
+        self.assertEqual(format_percent(40.0), Colors.yellow("40.0%"))
+        self.assertEqual(format_percent(39.9), Colors.gray("39.9%"))
+        self.assertEqual(format_percent(92.0, high_is_good=True), Colors.green("92.0%"))
+
+    def test_format_percent_used_semantics_inverted(self):
+        # BUG-011: for *used* quota a high fraction is bad (warn/danger color),
+        # and a low fraction is healthy (green) — the inverse reading.
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+        self.assertEqual(format_percent(92.0, high_is_good=False), Colors.red("92.0%"))
+        self.assertEqual(format_percent(100.0, high_is_good=False), Colors.red("100.0%"))
+        self.assertEqual(format_percent(75.0, high_is_good=False), Colors.red("75.0%"))
+        self.assertEqual(format_percent(74.9, high_is_good=False), Colors.yellow("74.9%"))
+        self.assertEqual(format_percent(40.0, high_is_good=False), Colors.yellow("40.0%"))
+        self.assertEqual(format_percent(39.9, high_is_good=False), Colors.green("39.9%"))
+        self.assertEqual(format_percent(30.0, high_is_good=False), Colors.green("30.0%"))
+        # The bug itself: 92.0% used must render a warn/danger color, never green.
+
     def test_sparkline(self):
         spark = render_sparkline([10, 20, 50, 80, 100])
         self.assertEqual(len(spark), 5)
@@ -347,6 +377,146 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         csv_out = UsageExporter.to_csv([s])
         self.assertIn("Session ID,Source,Workspace", csv_out)
         self.assertIn("s1,cli,ws", csv_out)
+
+
+class TestPipedOutputColorGating(unittest.TestCase):
+    """Regression tests for BUG-009: piped (non-tty) output must never contain
+    ANSI escapes, even when COLORTERM is exported by the parent shell (VS Code
+    integrated terminals, Warp, CI). Color enablement is gated on
+    sys.stdout.isatty() and NO_COLOR only; COLORTERM may exclusively UPGRADE
+    color depth (truecolor vs 256-color) and never flips enablement. The
+    BUG-004 override switch (Colors.set_override) composes: forced values win
+    over tty/env detection."""
+
+    def _hermetic_env(self, **extra):
+        """Runner env without inherited color variables, plus explicit extras.
+
+        BUG-004's override-based tests force color via the switch; these tests
+        exercise detection, so the inherited COLORTERM/NO_COLOR of the runner
+        must be neutralized."""
+        env = {"PATH": os.environ.get("PATH", "")}
+        env.update(extra)
+        return env
+
+    def _daily(self):
+        return {
+            date(2026, 9, 1): DailyUsage(
+                date=date(2026, 9, 1), usage=TokenUsage(prompt_tokens=1000)
+            )
+        }
+
+    def test_piped_render_has_no_ansi_even_with_colorterm(self):
+        """Non-tty render with COLORTERM=truecolor set: zero ANSI escapes —
+        the `agy-usage overview > report.txt` repro at render level. The
+        depth detector still says truecolor, but enablement gates it out."""
+        Colors.set_override(None)
+        self.addCleanup(Colors.set_override, None)
+        with mock.patch("sys.stdout.isatty", return_value=False):
+            with mock.patch.dict(os.environ, self._hermetic_env(COLORTERM="truecolor"), clear=True):
+                self.assertFalse(Colors.enabled())
+                self.assertFalse(HeatmapColor.supports_color())
+                self.assertTrue(HeatmapColor.supports_truecolor())  # depth, not enablement
+                rendered = TerminalHeatmap(
+                    self._daily(), metric="total", weeks=8, end_date=date(2026, 9, 10)
+                ).render()
+                self.assertNotIn("\033", rendered)
+                self.assertNotIn("\033", Colors.bold("plain"))
+                self.assertNotIn("\033", format_percent(92.8))
+
+    def test_piped_overview_via_main_writes_no_ansi(self):
+        """End-to-end: `agy-usage overview > report.txt` with COLORTERM exported
+        (piped StringIO stdout isatty()=False) writes zero escape bytes."""
+        self.addCleanup(Colors.set_override, None)
+        fake = SessionSummary(
+            session_id="abc123def456",
+            source="cli",
+            file_path="/tmp/fake.db",
+            title="Piped repro",
+            workspace="/ws/repro",
+            models=["gemini-3-pro"],
+            start_time=datetime(2026, 10, 26, 10, 0, 0),
+            end_time=datetime(2026, 10, 26, 10, 30, 0),
+            step_count=4,
+            usage=TokenUsage(prompt_tokens=5000, cached_tokens=20000, output_tokens=1000),
+        )
+        with mock.patch("agy_usage.cli.get_sessions", return_value=[fake]):
+            with mock.patch.dict(os.environ, self._hermetic_env(COLORTERM="truecolor"), clear=True):
+                with redirect_stdout(io.StringIO()) as captured:
+                    result = cli_main(["overview"])
+        self.assertEqual(result, 0)
+        out = captured.getvalue()
+        self.assertIn("ACTIVITY HEATMAP", out)  # real render path reached
+        self.assertNotIn("\033", out)
+
+    def test_no_color_env_beats_colorterm_on_a_tty(self):
+        """NO_COLOR=1 disables color even when COLORTERM="truecolor" and stdout
+        is a (simulated) tty."""
+        Colors.set_override(None)
+        self.addCleanup(Colors.set_override, None)
+        with mock.patch("sys.stdout.isatty", return_value=True):
+            with mock.patch.dict(
+                os.environ, self._hermetic_env(COLORTERM="truecolor", NO_COLOR="1"), clear=True
+            ):
+                self.assertFalse(Colors.enabled())
+                self.assertFalse(HeatmapColor.supports_color())
+                rendered = TerminalHeatmap(
+                    self._daily(), metric="total", weeks=8, end_date=date(2026, 9, 10)
+                ).render()
+                self.assertNotIn("\033", rendered)
+
+    def test_colorterm_only_upgrades_depth_never_enablement(self):
+        """With color enabled via the BUG-004 switch, COLORTERM=truecolor selects
+        the truecolor palette while its absence falls back to 256-color; on a
+        piped stdout enablement is False with and without COLORTERM alike."""
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+        with mock.patch.dict(os.environ, self._hermetic_env(TERM="xterm"), clear=True):
+            with mock.patch("sys.platform", "linux"):
+                # No COLORTERM: 256-color palette.
+                self.assertFalse(HeatmapColor.supports_truecolor())
+                self.assertIn("\033[38;5;", HeatmapColor.cell(2))
+                # COLORTERM=truecolor: same cell upgraded to 24-bit RGB.
+                with mock.patch.dict(os.environ, {"COLORTERM": "truecolor"}):
+                    self.assertTrue(HeatmapColor.supports_truecolor())
+                    self.assertIn("\033[38;2;", HeatmapColor.cell(2))
+                    self.assertTrue(Colors.enabled())  # forced by the switch, not by COLORTERM
+        # Enablement on piped stdout is identical with and without COLORTERM.
+        Colors.set_override(None)
+        with mock.patch("sys.stdout.isatty", return_value=False):
+            with mock.patch.dict(os.environ, self._hermetic_env(), clear=True):
+                self.assertFalse(Colors.enabled())
+            with mock.patch.dict(os.environ, self._hermetic_env(COLORTERM="truecolor"), clear=True):
+                self.assertFalse(Colors.enabled())
+        # ...and on a tty COLORTERM neither helps nor hurts: isatty decides.
+        with mock.patch("sys.stdout.isatty", return_value=True):
+            with mock.patch.dict(os.environ, self._hermetic_env(), clear=True):
+                self.assertTrue(Colors.enabled())
+            with mock.patch.dict(os.environ, self._hermetic_env(COLORTERM="truecolor"), clear=True):
+                self.assertTrue(Colors.enabled())
+
+    def test_bug004_override_switch_outranks_env_and_tty(self):
+        """Composition guarantee kept from BUG-004: the forced switch wins over
+        tty/env detection in both directions — piped stdout still renders with
+        escapes when forced on, and a TTY with COLORTERM stays plain when the
+        switch is forced off."""
+        self.addCleanup(Colors.set_override, None)
+        Colors.set_override(True)
+        with mock.patch("sys.stdout.isatty", return_value=False):
+            with mock.patch.dict(os.environ, self._hermetic_env(TERM="xterm"), clear=True):
+                self.assertTrue(Colors.enabled())
+                self.assertIn("\033", HeatmapColor.cell(2))
+                rendered = TerminalHeatmap(
+                    self._daily(), metric="total", weeks=8, end_date=date(2026, 9, 10)
+                ).render()
+                self.assertIn("\033[38;", rendered)
+        Colors.set_override(False)
+        with mock.patch("sys.stdout.isatty", return_value=True):
+            with mock.patch.dict(os.environ, self._hermetic_env(COLORTERM="truecolor"), clear=True):
+                self.assertFalse(Colors.enabled())
+                rendered = TerminalHeatmap(
+                    self._daily(), metric="total", weeks=8, end_date=date(2026, 9, 10)
+                ).render()
+                self.assertNotIn("\033", rendered)
 
 
 class TestSessionInspect(unittest.TestCase):
@@ -627,6 +797,72 @@ class TestLimits(unittest.TestCase):
         csv_out = buf_csv.getvalue()
         self.assertIn("5-Hour Sprint", csv_out)
         self.assertIn("Weekly Cap", csv_out)
+
+    def test_cmd_limits_used_percent_uses_inverted_semantics(self):
+        """BUG-011: in the limits gauge rows, '(x.x% used)' must color high usage
+        warn/danger instead of green, while the '(x.x% exact' remaining fragment
+        keeps the unchanged thresholds."""
+        import argparse
+        import io
+        import re
+        import sys
+        from agy_usage.cli import cmd_limits
+
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+
+        t = datetime.now()
+        # 81M tokens against the pro-tier 100M 5h / 750M weekly Gemini caps:
+        # the 5h window sits at 81.0% used (previously rendered green — the bug),
+        # the weekly window at 10.8% used (healthy green under inverted semantics).
+        session = SessionSummary(
+            session_id="s-usage-bug011",
+            source="cli",
+            file_path="/tmp/bug011-nonexistent.db",
+            title="BUG-011 Used Percent Color",
+            workspace="ws",
+            models=["gemini-3.8-flash"],
+            start_time=t,
+            end_time=t,
+            step_count=1,
+            usage=TokenUsage(prompt_tokens=80_000_000, cached_tokens=0, output_tokens=1_000_000),
+            steps=[StepRecord(step_idx=1, timestamp=t, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=80_000_000, cached_tokens=0, output_tokens=1_000_000))],
+        )
+        args = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, json=False, csv=False)
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            cmd_limits([session], args)
+        finally:
+            sys.stdout = old_stdout
+
+        out = buf.getvalue()
+        gauge_lines = [ln for ln in out.splitlines() if "exact |" in ln]
+        self.assertEqual(len(gauge_lines), 5)  # gemini weekly/5h, claude weekly/5h, argon weekly
+
+        any_high_used_seen = False
+        for ln in gauge_lines:
+            plain = strip_ansi(ln)
+            rem_val = float(re.search(r"\((\d+\.\d)% exact", plain).group(1))
+            used_val = float(re.search(r"\| (\d+\.\d)% used\)", plain).group(1))
+            self.assertAlmostEqual(rem_val + used_val, 100.0, delta=0.1)
+            # The used fragment must match the inverted path, wrapped before " used)".
+            used_fragment = format_percent(used_val, high_is_good=False) + " used)"
+            self.assertIn(used_fragment, ln)
+            if used_val >= 75.0:
+                any_high_used_seen = True
+                self.assertNotIn(Colors.green(f"{used_val:.1f}%"), ln)
+        self.assertTrue(any_high_used_seen)
+
+        # High usage: Gemini 5h at 81.0% used renders red (was green before the fix).
+        self.assertTrue(any(Colors.red("81.0%") in ln for ln in gauge_lines))
+        self.assertFalse(any(Colors.green("81.0%") in ln for ln in gauge_lines))
+        # Low usage: Gemini weekly at 10.8% used stays green (healthy).
+        self.assertTrue(any(Colors.green("10.8%") + " used)" in ln for ln in gauge_lines))
+        # Remaining fragments are unchanged: weekly 89.2% green, 5h 19.0% gray.
+        self.assertTrue(any(Colors.green("89.2%") + " exact |" in ln for ln in gauge_lines))
+        self.assertTrue(any(Colors.gray("19.0%") + " exact |" in ln for ln in gauge_lines))
 
     def test_cmd_statusline_formatting_and_exports(self):
         import argparse
@@ -1265,6 +1501,263 @@ class TestParseSessionDB(unittest.TestCase):
             self.assertFalse(os.path.exists(ghost))
             self.assertFalse(os.path.exists(ghost + "-journal"))
             self.assertFalse(os.path.exists(ghost + "-wal"))
+
+
+class TestPartialSessionParse(unittest.TestCase):
+    """Regression tests for BUG-008: one transient SQLite error or one corrupt
+    step row must not discard the metadata/steps already parsed from a session.
+    """
+
+    @staticmethod
+    def _varint(value):
+        out = bytearray()
+        while True:
+            b = value & 0x7F
+            value >>= 7
+            if value:
+                out.append(b | 0x80)
+            else:
+                out.append(b)
+                return bytes(out)
+
+    @classmethod
+    def _len_field(cls, num, data):
+        return cls._varint((num << 3) | 2) + cls._varint(len(data)) + data
+
+    @classmethod
+    def _varint_field(cls, num, value):
+        return cls._varint(num << 3) + cls._varint(value)
+
+    @classmethod
+    def _timestamp(cls, seconds):
+        return cls._varint_field(1, seconds)
+
+    @classmethod
+    def _usage(cls, prompt, output):
+        return cls._varint_field(2, prompt) + cls._varint_field(3, output)
+
+    def _write_db(self, path, rows, workspace="file:///Users/me/proj", title=None):
+        """Create a minimal DB with a workspace blob, an optional user prompt,
+        and `rows` of (idx, metadata) steps."""
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute(
+                "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type TEXT, "
+                "step_payload BLOB, metadata BLOB)"
+            )
+            conn.execute("CREATE TABLE trajectory_metadata_blob (data BLOB)")
+            ws_blob = self._len_field(1, self._len_field(1, workspace.encode()))
+            ws_blob += self._len_field(2, self._timestamp(1_751_000_000))
+            conn.execute("INSERT INTO trajectory_metadata_blob (data) VALUES (?)", (ws_blob,))
+            for idx, metadata in rows:
+                payload = (
+                    self._len_field(19, self._len_field(2, title.encode()))
+                    if title and idx == 1
+                    else b""
+                )
+                conn.execute(
+                    "INSERT INTO steps (idx, step_type, step_payload, metadata) VALUES (?, ?, ?, ?)",
+                    (idx, "user", payload, metadata),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return path
+
+    def test_corrupt_row_keeps_prior_and_later_steps(self):
+        ts = self._timestamp(1_751_234_567)
+        meta = self._len_field(1, ts) + self._len_field(9, self._usage(1000, 200))
+        bad_blob = b"corrupt-metadata"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-corrupt.db"),
+                [(1, meta), (2, bad_blob), (3, meta)],
+                title="Diagnose the parser",
+            )
+            def flaky(data):
+                if data == bad_blob:
+                    raise ValueError("corrupt protobuf")
+                return parse_proto_fields(data)
+
+            with mock.patch("agy_usage.parser.parse_proto_fields", side_effect=flaky):
+                summary = AntigravityParser.parse_session_db(path)
+
+            self.assertIsNotNone(summary, "corrupt row dropped the whole session")
+            self.assertEqual(summary.session_id, "sess-corrupt")
+            self.assertEqual(summary.title, "Diagnose the parser")
+            self.assertEqual(summary.workspace, "proj")
+            self.assertEqual(summary.step_count, 2)
+            self.assertEqual(summary.usage.total_tokens, 2400)
+            self.assertEqual([s.step_idx for s in summary.steps], [1, 3])
+
+    def test_lock_during_step_read_returns_partial_summary(self):
+        ts = self._timestamp(1_751_234_567)
+        meta = self._len_field(1, ts) + self._len_field(9, self._usage(1000, 200))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-locked.db"),
+                [(1, meta)],
+                title="Locked session",
+            )
+            summary = self._parse_with_locked_steps(path)
+
+            self.assertIsNotNone(summary, "a transient lock dropped the whole session")
+            self.assertEqual(summary.session_id, "sess-locked")
+            self.assertEqual(summary.title, "Locked session")
+            self.assertEqual(summary.workspace, "proj")
+            self.assertEqual(summary.start_time, datetime.fromtimestamp(1_751_000_000))
+            self.assertEqual(summary.step_count, 0)
+            self.assertEqual(summary.usage.total_tokens, 0)
+
+    def _parse_with_sql_failure(self, path, marker, error):
+        """Parse while any statement containing `marker` raises `error`."""
+        real_connect = sqlite3.connect
+
+        class FailingCursor:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *params):
+                if marker in sql:
+                    raise error
+                return self._inner.execute(sql, *params)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        class FailingConnection:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def cursor(self):
+                return FailingCursor(self._inner.cursor())
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def fake_connect(*args, **kwargs):
+            return FailingConnection(real_connect(*args, **kwargs))
+
+        with mock.patch("agy_usage.parser.sqlite3.connect", side_effect=fake_connect):
+            return AntigravityParser.parse_session_db(path)
+
+    def test_lock_during_step_read_returns_partial_summary(self):
+        ts = self._timestamp(1_751_234_567)
+        meta = self._len_field(1, ts) + self._len_field(9, self._usage(1000, 200))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-locked.db"),
+                [(1, meta)],
+                title="Locked session",
+            )
+            summary = self._parse_with_sql_failure(
+                path,
+                "metadata IS NOT NULL",
+                sqlite3.OperationalError("database is locked"),
+            )
+
+            self.assertIsNotNone(summary, "a transient lock dropped the whole session")
+            self.assertEqual(summary.session_id, "sess-locked")
+            self.assertEqual(summary.title, "Locked session")
+            self.assertEqual(summary.workspace, "proj")
+            self.assertEqual(summary.start_time, datetime.fromtimestamp(1_751_000_000))
+            self.assertEqual(summary.step_count, 0)
+            self.assertEqual(summary.usage.total_tokens, 0)
+
+    def test_lock_during_title_query_is_contained(self):
+        """Section 3's own guard swallows the lock, so parsing continues: the
+        blob start time and the step totals must survive the failed query."""
+        meta = self._len_field(1, self._timestamp(1_751_234_567))
+        meta += self._len_field(9, self._usage(1000, 200))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-title-locked.db"),
+                [(1, meta)],
+                title="Locked title",
+            )
+            summary = self._parse_with_sql_failure(
+                path,
+                "step_payload IS NOT NULL",
+                sqlite3.OperationalError("database is locked"),
+            )
+
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary.workspace, "proj")
+            self.assertEqual(summary.start_time, datetime.fromtimestamp(1_751_000_000))
+            self.assertEqual(summary.title, "Session sess-tit")
+            self.assertEqual(summary.step_count, 1)
+            self.assertEqual(summary.usage.total_tokens, 1200)
+
+    def test_corrupt_db_during_step_read_returns_partial_summary(self):
+        """A plain sqlite3.DatabaseError (corrupt page) is not an
+        OperationalError and must keep the already-parsed metadata too."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-corrupt-db.db"),
+                [(1, self._len_field(9, self._usage(1000, 200)))],
+                title="Corrupt read",
+            )
+            summary = self._parse_with_sql_failure(
+                path,
+                "metadata IS NOT NULL",
+                sqlite3.DatabaseError("database disk image is malformed"),
+            )
+
+            self.assertIsNotNone(summary, "a corrupt read dropped the session")
+            self.assertEqual(summary.title, "Corrupt read")
+            self.assertEqual(summary.workspace, "proj")
+            self.assertEqual(summary.start_time, datetime.fromtimestamp(1_751_000_000))
+            self.assertEqual(summary.step_count, 0)
+
+    def test_empty_steps_table_emits_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(os.path.join(tmp, "sess-empty.db"), [])
+            summary = AntigravityParser.parse_session_db(path)
+
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary.session_id, "sess-empty")
+            self.assertEqual(summary.workspace, "proj")
+            self.assertEqual(summary.step_count, 0)
+            self.assertEqual(summary.usage.total_tokens, 0)
+
+    def test_unreadable_mtime_skips_untimed_rows(self):
+        """If the DB vanishes, steps without timestamps are skipped instead of
+        crashing the parse; timed rows still count."""
+        timed = self._len_field(1, self._timestamp(1_751_234_567))
+        timed += self._len_field(9, self._usage(1000, 200))
+        untimed = self._len_field(9, self._usage(500, 100))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-no-mtime.db"),
+                [(1, timed), (2, untimed)],
+            )
+            with mock.patch("agy_usage.parser.os.path.getmtime", side_effect=OSError("gone")):
+                summary = AntigravityParser.parse_session_db(path)
+
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary.step_count, 1)
+            self.assertEqual(summary.usage.total_tokens, 1200)
+            self.assertEqual([s.step_idx for s in summary.steps], [1])
+
+    def test_lock_before_validation_returns_none(self):
+        """If SQLite fails before the DB is known to be a session, there is no
+        partial data worth surfacing - keep the old "skip it" behavior."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-unreadable.db"),
+                [(1, self._len_field(9, self._usage(10, 5)))],
+            )
+            summary = self._parse_with_sql_failure(
+                path,
+                "sqlite_master",
+                sqlite3.OperationalError("database is locked"),
+            )
+            self.assertIsNone(summary)
 
 
 class TestGenMetadataModelAttribution(unittest.TestCase):
