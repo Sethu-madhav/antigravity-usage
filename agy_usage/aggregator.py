@@ -7,12 +7,14 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from agy_usage.models import (
+    CostBreakdown,
     DailyUsage,
     ModelUsage,
     MonthlyUsage,
     SessionSummary,
     TokenUsage,
     WeeklyUsage,
+    normalize_model_name,
 )
 
 
@@ -33,8 +35,9 @@ class UsageAggregator:
                         daily[d] = DailyUsage(date=d)
                     item = daily[d]
                     item.usage = item.usage.add(step.usage)
+                    item.cost = item.cost.add(step.cost)
                     item.session_ids.add(s.session_id)
-                    item.models.add(step.model)
+                    item.models.add(normalize_model_name(step.model))
                     item.steps_count += 1
             elif s.start_time:
                 # Session has usage but steps weren't separately detailed
@@ -43,9 +46,10 @@ class UsageAggregator:
                     daily[d] = DailyUsage(date=d)
                 item = daily[d]
                 item.usage = item.usage.add(s.usage)
+                item.cost = item.cost.add(s.cost)
                 item.session_ids.add(s.session_id)
                 for m in s.models:
-                    item.models.add(m)
+                    item.models.add(normalize_model_name(m))
                 item.steps_count += s.step_count
 
         return daily
@@ -74,6 +78,7 @@ class UsageAggregator:
                 )
             w = weekly_map[key]
             w.usage = w.usage.add(daily_item.usage)
+            w.cost = w.cost.add(daily_item.cost)
             w.step_count += daily_item.steps_count
             weekly_sessions[key].update(daily_item.session_ids)
 
@@ -97,6 +102,7 @@ class UsageAggregator:
                 monthly_map[key] = MonthlyUsage(year=d.year, month=d.month)
             m = monthly_map[key]
             m.usage = m.usage.add(daily_item.usage)
+            m.cost = m.cost.add(daily_item.cost)
             m.step_count += daily_item.steps_count
             monthly_sessions[key].update(daily_item.session_ids)
 
@@ -116,20 +122,22 @@ class UsageAggregator:
         for s in sessions:
             if s.steps:
                 for step in s.steps:
-                    m_name = step.model or "unknown"
+                    m_name = normalize_model_name(step.model) or "unknown"
                     if m_name not in model_map:
                         model_map[m_name] = ModelUsage(model_name=m_name)
                     mu = model_map[m_name]
                     mu.usage = mu.usage.add(step.usage)
+                    mu.cost = mu.cost.add(step.cost)
                     mu.request_count += 1
                     model_sessions[m_name].add(s.session_id)
                     total_tokens_all += step.usage.total_tokens
             else:
-                m_name = s.primary_model
+                m_name = normalize_model_name(s.primary_model) or "unknown"
                 if m_name not in model_map:
                     model_map[m_name] = ModelUsage(model_name=m_name)
                 mu = model_map[m_name]
                 mu.usage = mu.usage.add(s.usage)
+                mu.cost = mu.cost.add(s.cost)
                 mu.request_count += s.step_count
                 model_sessions[m_name].add(s.session_id)
                 total_tokens_all += s.usage.total_tokens
@@ -147,6 +155,7 @@ class UsageAggregator:
     def compute_summary(sessions: List[SessionSummary]) -> Dict[str, Any]:
         """Compute high-level summary KPIs across all sessions."""
         total_usage = TokenUsage()
+        total_cost = CostBreakdown()
         total_steps = 0
         earliest_ts: Optional[datetime] = None
         latest_ts: Optional[datetime] = None
@@ -154,6 +163,7 @@ class UsageAggregator:
 
         for s in sessions:
             total_usage = total_usage.add(s.usage)
+            total_cost = total_cost.add(s.cost)
             total_steps += s.step_count
             if s.workspace and s.workspace != "Unknown":
                 unique_workspaces.add(s.workspace)
@@ -177,6 +187,7 @@ class UsageAggregator:
             "earliest_date": earliest_ts.date().isoformat() if earliest_ts else None,
             "latest_date": latest_ts.date().isoformat() if latest_ts else None,
             "total_usage": total_usage,
+            "total_cost": total_cost,
             "cache_hit_rate": total_usage.cache_hit_rate,
             "models": models,
         }

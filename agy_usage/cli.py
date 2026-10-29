@@ -30,6 +30,7 @@ from agy_usage.limits import (
     get_status_badge,
     parse_token_amount,
     render_gauge_bar,
+    render_remaining_bar,
 )
 from agy_usage.models import SessionSummary, calculate_cost
 from agy_usage.parser import AntigravityParser
@@ -232,12 +233,33 @@ Examples:
         "--5h-limit",
         "--five-hour-limit",
         dest="five_h_limit",
-        help="Custom 5-hour limit in tokens (e.g. 50M, 100M)",
+        help="Custom Gemini 5-hour limit in tokens (e.g. 50M, 100M)",
     )
     sub_limits.add_argument(
         "--weekly-limit",
         dest="weekly_limit",
-        help="Custom weekly limit in tokens (e.g. 250M, 1B)",
+        help="Custom Gemini weekly limit in tokens (e.g. 250M, 750M)",
+    )
+    sub_limits.add_argument(
+        "--argon-weekly-limit",
+        dest="argon_weekly_limit",
+        help="Custom Gemini 4 Argon weekly limit in tokens (e.g. 25M, 50M)",
+    )
+    sub_limits.add_argument(
+        "--argon-remaining-pct",
+        dest="argon_remaining_pct",
+        type=float,
+        help="Calibrate Argon weekly cap from the 'Remaining %%' shown in Antigravity UI",
+    )
+    sub_limits.add_argument(
+        "--claude-5h-limit",
+        dest="claude_five_h_limit",
+        help="Custom Claude 5-hour limit in tokens (e.g. 25M)",
+    )
+    sub_limits.add_argument(
+        "--claude-weekly-limit",
+        dest="claude_weekly_limit",
+        help="Custom Claude weekly limit in tokens (e.g. 150M)",
     )
     sub_limits.add_argument(
         "--json", action="store_true", help="Output limits analysis as JSON"
@@ -260,12 +282,23 @@ Examples:
         "--5h-limit",
         "--five-hour-limit",
         dest="five_h_limit",
-        help="Custom 5-hour limit in tokens (e.g. 50M, 100M)",
+        help="Custom Gemini 5-hour limit in tokens (e.g. 50M, 100M)",
     )
     sub_statusline.add_argument(
         "--weekly-limit",
         dest="weekly_limit",
-        help="Custom weekly limit in tokens (e.g. 250M, 1B)",
+        help="Custom Gemini weekly limit in tokens (e.g. 250M, 750M)",
+    )
+    sub_statusline.add_argument(
+        "--argon-weekly-limit",
+        dest="argon_weekly_limit",
+        help="Custom Gemini 4 Argon weekly limit in tokens (e.g. 25M, 50M)",
+    )
+    sub_statusline.add_argument(
+        "--argon-remaining-pct",
+        dest="argon_remaining_pct",
+        type=float,
+        help="Calibrate Argon weekly cap from the 'Remaining %%' shown in Antigravity UI",
     )
     sub_statusline.add_argument(
         "-s",
@@ -345,6 +378,9 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> No
 
     summary = UsageAggregator.compute_summary(sessions)
     u = summary["total_usage"]
+    tot_cost_bd = summary["total_cost"]
+    bill_c = tot_cost_bd.billable
+    tot_c = tot_cost_bd.total
 
     # 1. Header & KPI Cards
     card1 = (
@@ -354,20 +390,19 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> No
     )
     card2 = (
         "CACHE SAVINGS",
-        Colors.bold(Colors.green(format_tokens(u.cached_tokens))),
+        f"{Colors.bold(Colors.green(format_tokens(u.cached_tokens)))} {Colors.dim(f'({format_cost(tot_cost_bd.cache_savings)})')}",
         f"{format_percent(u.cache_hit_rate)} prompt hit rate",
     )
-    p_c, _, o_c, tot_c = calculate_cost(u.prompt_tokens, u.cached_tokens, u.output_tokens)
-    bill_c = p_c + o_c
     card3 = (
         "BILLABLE CONSUMED",
-        Colors.bold(Colors.yellow(format_tokens(u.billable_tokens))),
-        f"{format_tokens(u.prompt_tokens)} in + {format_tokens(u.output_tokens)} out ({format_cost(bill_c)})",
+        f"{Colors.bold(Colors.yellow(format_tokens(u.billable_tokens)))} {Colors.dim(f'({format_cost(bill_c)})')}",
+        f"{format_tokens(u.prompt_tokens)} in + {format_tokens(u.output_tokens)} out",
     )
+    sess_label = f"{summary['session_count']} sessions"
     card4 = (
         "ACTIVITY",
-        Colors.bold(Colors.cyan(f"{summary['session_count']} sessions")),
-        f"{summary['step_count']} steps / {summary['active_days']} days ({format_cost(tot_c)})",
+        f"{Colors.bold(Colors.cyan(sess_label))} {Colors.dim(f'({format_cost(tot_c)})')}",
+        f"{summary['step_count']} steps / {summary['active_days']} days",
     )
 
     print(render_kpi_grid([card1, card2, card3, card4]))
@@ -387,7 +422,7 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> No
         m_rows = []
         for m in models:
             mu = m.usage
-            _, _, _, m_cost = calculate_cost(mu.prompt_tokens, mu.cached_tokens, mu.output_tokens, model_name=m.model_name)
+            m_cost = m.cost.total
             m_rows.append([
                 Colors.bold(m.model_name),
                 f"{m.request_count:,}",
@@ -497,7 +532,7 @@ def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> No
     for s in selected:
         u = s.usage
         started_str = s.start_time.strftime("%Y-%m-%d %H:%M") if s.start_time else "N/A"
-        _, _, _, s_cost = calculate_cost(u.prompt_tokens, u.cached_tokens, u.output_tokens, model_name=s.primary_model)
+        s_cost = s.cost.total
         rows.append([
             Colors.cyan(s.short_id),
             Colors.dim(s.source.upper()),
@@ -564,14 +599,15 @@ def cmd_session_inspect(
     print(f"  {Colors.bold('Time:')}         {started_str} → {ended_str} ({format_duration(matched.duration_seconds)}{turns_str})")
     print()
 
-    # Cost calculations
-    model_name = matched.primary_model or (matched.models[0] if matched.models else "gemini-3.8-flash")
-    p_cost, c_cost, o_cost, total_cost = calculate_cost(
-        u.prompt_tokens, u.cached_tokens, u.output_tokens, model_name=model_name
-    )
-    billable_cost = p_cost + o_cost
-    _, _, th_cost, _ = calculate_cost(0, 0, u.thought_tokens, model_name=model_name)
-    _, _, ca_cost, _ = calculate_cost(0, 0, u.candidate_tokens, model_name=model_name)
+    # Cost calculations (summed per step so multi-model sessions are exact)
+    cost_bd = matched.cost
+    p_cost = cost_bd.prompt_cost
+    c_cost = cost_bd.cached_cost
+    o_cost = cost_bd.output_cost
+    total_cost = cost_bd.total
+    billable_cost = cost_bd.billable
+    th_cost = cost_bd.thought_cost
+    ca_cost = cost_bd.candidate_cost
 
     # 1. KPI Cards
     card1 = (
@@ -581,7 +617,7 @@ def cmd_session_inspect(
     )
     card2 = (
         "CACHE SAVINGS",
-        Colors.bold(Colors.green(format_tokens(u.cached_tokens))),
+        f"{Colors.bold(Colors.green(format_tokens(u.cached_tokens)))} {Colors.dim(f'({format_cost(cost_bd.cache_savings)})')}",
         f"{format_percent(u.cache_hit_rate)} prompt hit rate",
     )
     card3 = (
@@ -768,7 +804,7 @@ def cmd_models(sessions: List[SessionSummary]) -> None:
     for m in models:
         mu = m.usage
         bar = render_bar(mu.total_tokens, max_tokens, width=14)
-        _, _, _, m_cost = calculate_cost(mu.prompt_tokens, mu.cached_tokens, mu.output_tokens, model_name=m.model_name)
+        m_cost = m.cost.total
         rows.append([
             Colors.bold(m.model_name),
             str(m.session_count),
@@ -811,18 +847,65 @@ def cmd_live(args: argparse.Namespace) -> None:
         print(Colors.dim("Live monitor stopped."))
 
 
+def _window_to_dict(w) -> dict:
+    return {
+        "start": w.start_time.isoformat(),
+        "end": w.end_time.isoformat(),
+        "refresh_at": w.refresh_time.isoformat() if w.refresh_time else None,
+        "next_relief_at": w.next_relief_time.isoformat() if w.next_relief_time else None,
+        "total_tokens": w.usage.total_tokens,
+        "cached_tokens": w.usage.cached_tokens,
+        "prompt_tokens": w.usage.prompt_tokens,
+        "output_tokens": w.usage.output_tokens,
+        "billable_tokens": w.usage.billable_tokens,
+        "cache_hit_rate": round(w.usage.cache_hit_rate, 2),
+        "limit_tokens": w.limit_tokens,
+        "pct_used": round(w.pct_used, 2),
+        "pct_remaining": round(w.pct_remaining, 2),
+        "tokens_remaining": w.tokens_remaining,
+        "estimated_cost_usd": round(w.estimated_cost, 4),
+        "turns": w.step_count,
+        "sessions": w.session_count,
+    }
+
+
 def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
-    """Display 5-hour rolling limit and weekly quota limits."""
+    """Display 5-hour rolling limit and weekly quota limits across Gemini, Argon, and Claude pools."""
     tier = getattr(args, "tier", "pro") or "pro"
     custom_5h = parse_token_amount(getattr(args, "five_h_limit", None))
     custom_weekly = parse_token_amount(getattr(args, "weekly_limit", None))
+    custom_argon_weekly = parse_token_amount(getattr(args, "argon_weekly_limit", None))
+    argon_rem_pct = getattr(args, "argon_remaining_pct", None)
+    custom_claude_5h = parse_token_amount(getattr(args, "claude_five_h_limit", None))
+    custom_claude_weekly = parse_token_amount(getattr(args, "claude_weekly_limit", None))
 
-    w_5h, w_7d, tier_cfg = LimitsCalculator.compute(
-        sessions, tier_name=tier, five_h_limit=custom_5h, weekly_limit=custom_weekly
+    now_dt = datetime.now()
+    pools = LimitsCalculator.compute_all_pools(
+        sessions,
+        tier_name=tier,
+        five_h_limit=custom_5h,
+        weekly_limit=custom_weekly,
+        argon_weekly_limit=custom_argon_weekly,
+        argon_remaining_pct=argon_rem_pct,
+        claude_five_h_limit=custom_claude_5h,
+        claude_weekly_limit=custom_claude_weekly,
+        now=now_dt,
     )
+    w_5h = pools.gemini_5h
+    w_7d = pools.gemini_7d
+    argon_7d = pools.argon_7d
+    claude_5h = pools.claude_5h
+    claude_7d = pools.claude_7d
+    tier_cfg = pools.tier
 
-    badge, status_msg = get_status_badge(w_5h, w_7d)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    badge, status_msg = get_status_badge(
+        w_5h,
+        w_7d,
+        argon_7d=argon_7d,
+        claude_5h=claude_5h,
+        claude_7d=claude_7d,
+    )
+    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     # JSON export support
     if getattr(args, "json", False):
@@ -830,43 +913,15 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
         payload = {
             "tier": tier_cfg.name,
             "checked_at": now_str,
+            "live_synced": pools.live_synced,
             "status": badge,
             "pool": "Gemini Models",
-            "five_hour_window": {
-                "start": w_5h.start_time.isoformat(),
-                "end": w_5h.end_time.isoformat(),
-                "refresh_at": w_5h.refresh_time.isoformat() if w_5h.refresh_time else None,
-                "total_tokens": w_5h.usage.total_tokens,
-                "cached_tokens": w_5h.usage.cached_tokens,
-                "prompt_tokens": w_5h.usage.prompt_tokens,
-                "output_tokens": w_5h.usage.output_tokens,
-                "billable_tokens": w_5h.usage.billable_tokens,
-                "cache_hit_rate": round(w_5h.usage.cache_hit_rate, 2),
-                "limit_tokens": w_5h.limit_tokens,
-                "pct_used": round(w_5h.pct_used, 2),
-                "pct_remaining": round(w_5h.pct_remaining, 2),
-                "tokens_remaining": w_5h.tokens_remaining,
-                "estimated_cost_usd": round(w_5h.estimated_cost, 4),
-                "turns": w_5h.step_count,
-                "sessions": w_5h.session_count,
-            },
-            "weekly_budget": {
-                "start": w_7d.start_time.isoformat(),
-                "end": w_7d.end_time.isoformat(),
-                "refresh_at": w_7d.refresh_time.isoformat() if w_7d.refresh_time else None,
-                "total_tokens": w_7d.usage.total_tokens,
-                "cached_tokens": w_7d.usage.cached_tokens,
-                "prompt_tokens": w_7d.usage.prompt_tokens,
-                "output_tokens": w_7d.usage.output_tokens,
-                "billable_tokens": w_7d.usage.billable_tokens,
-                "cache_hit_rate": round(w_7d.usage.cache_hit_rate, 2),
-                "limit_tokens": w_7d.limit_tokens,
-                "pct_used": round(w_7d.pct_used, 2),
-                "pct_remaining": round(w_7d.pct_remaining, 2),
-                "tokens_remaining": w_7d.tokens_remaining,
-                "estimated_cost_usd": round(w_7d.estimated_cost, 4),
-                "turns": w_7d.step_count,
-                "sessions": w_7d.session_count,
+            "five_hour_window": _window_to_dict(w_5h),
+            "weekly_budget": _window_to_dict(w_7d),
+            "argon_weekly_budget": _window_to_dict(argon_7d),
+            "claude_pool": {
+                "five_hour_window": _window_to_dict(claude_5h),
+                "weekly_budget": _window_to_dict(claude_7d),
             },
         }
         print(json.dumps(payload, indent=2))
@@ -881,117 +936,158 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
         writer.writerow(["Window", "Total Tokens", "Cached Tokens", "Billable Tokens", "Limit Tokens", "Pct Remaining", "Pct Used", "Tokens Remaining", "Est Cost USD", "Turns", "Sessions"])
         writer.writerow(["5-Hour Sprint", w_5h.usage.total_tokens, w_5h.usage.cached_tokens, w_5h.usage.billable_tokens, w_5h.limit_tokens, f"{w_5h.pct_remaining:.1f}%", f"{w_5h.pct_used:.1f}%", w_5h.tokens_remaining, f"{w_5h.estimated_cost:.4f}", w_5h.step_count, w_5h.session_count])
         writer.writerow(["Weekly Cap", w_7d.usage.total_tokens, w_7d.usage.cached_tokens, w_7d.usage.billable_tokens, w_7d.limit_tokens, f"{w_7d.pct_remaining:.1f}%", f"{w_7d.pct_used:.1f}%", w_7d.tokens_remaining, f"{w_7d.estimated_cost:.4f}", w_7d.step_count, w_7d.session_count])
+        writer.writerow(["Argon Weekly Cap", argon_7d.usage.total_tokens, argon_7d.usage.cached_tokens, argon_7d.usage.billable_tokens, argon_7d.limit_tokens, f"{argon_7d.pct_remaining:.1f}%", f"{argon_7d.pct_used:.1f}%", argon_7d.tokens_remaining, f"{argon_7d.estimated_cost:.4f}", argon_7d.step_count, argon_7d.session_count])
+        writer.writerow(["Claude & GPT 5-Hour", claude_5h.usage.total_tokens, claude_5h.usage.cached_tokens, claude_5h.usage.billable_tokens, claude_5h.limit_tokens, f"{claude_5h.pct_remaining:.1f}%", f"{claude_5h.pct_used:.1f}%", claude_5h.tokens_remaining, f"{claude_5h.estimated_cost:.4f}", claude_5h.step_count, claude_5h.session_count])
+        writer.writerow(["Claude & GPT Weekly Cap", claude_7d.usage.total_tokens, claude_7d.usage.cached_tokens, claude_7d.usage.billable_tokens, claude_7d.limit_tokens, f"{claude_7d.pct_remaining:.1f}%", f"{claude_7d.pct_used:.1f}%", claude_7d.tokens_remaining, f"{claude_7d.estimated_cost:.4f}", claude_7d.step_count, claude_7d.session_count])
         print(buf.getvalue().strip())
         return
 
+    sync_tag = (
+        Colors.green("Live Antigravity Server + Local DB")
+        if pools.live_synced
+        else Colors.dim("Local DB Cost-Proportional Model")
+    )
     print()
     print(Colors.bold(Colors.cyan("── ANTIGRAVITY QUOTA & RATE LIMITS MONITOR " + "─" * 38)))
-    print(f"  {Colors.bold('Model Pool:')}     Gemini Models (Flash 3.8 / 3.7 / Pro 3.1)")
+    print(f"  {Colors.bold('Model Groups:')}   Gemini Models  |  Claude and GPT models  |  Gemini 4 Argon")
     print(f"  {Colors.bold('Subscription:')}   {tier_cfg.display_name} ({tier_cfg.description})")
+    print(f"  {Colors.bold('Quota Source:')}   {sync_tag}")
     print(f"  {Colors.bold('Checked At:')}     {now_str}")
     print(f"  {Colors.bold('System Status:')}  {badge} {status_msg}")
     print()
 
-    # Recovery countdowns for KPI cards
-    w5_countdown = "Ready"
-    if w_5h.refresh_time and w_5h.usage.total_tokens > 0:
-        secs_5h = (w_5h.refresh_time - datetime.now()).total_seconds()
-        if secs_5h > 0:
-            w5_countdown = f"in {format_duration(secs_5h)}"
+    def _countdown(w) -> str:
+        if w.refresh_time and (w.usage.total_tokens > 0 or w.pct_used > 0):
+            secs = (w.refresh_time - now_dt).total_seconds()
+            if secs > 0:
+                return f"in {format_duration(secs)}"
+        return "Ready"
 
-    w7_countdown = "Ready"
-    if w_7d.refresh_time and w_7d.usage.total_tokens > 0:
-        secs_7d = (w_7d.refresh_time - datetime.now()).total_seconds()
-        if secs_7d > 0:
-            w7_countdown = f"in {format_duration(secs_7d)}"
+    w5_countdown = _countdown(w_5h)
+    w7_countdown = _countdown(w_7d)
+    c5_countdown = _countdown(claude_5h)
+    argon_countdown = _countdown(argon_7d)
 
-    # 1. KPI Cards (Matching Official Google Antigravity UI Remaining Cards)
-    rem_5h_color = Colors.green if w_5h.pct_remaining >= 40.0 else (Colors.yellow if w_5h.pct_remaining >= 15.0 else Colors.red)
-    rem_7d_color = Colors.green if w_7d.pct_remaining >= 40.0 else (Colors.yellow if w_7d.pct_remaining >= 15.0 else Colors.red)
+    def _rem_color(pct_rem: float):
+        if pct_rem >= 40.0:
+            return Colors.green
+        if pct_rem >= 15.0:
+            return Colors.yellow
+        return Colors.red
 
+    # 1. KPI Summary Cards (Matching Official Antigravity Models & Usage Groups)
     card1 = (
         "5-HOUR REMAINING",
-        Colors.bold(rem_5h_color(f"{w_5h.pct_remaining:.0f}%")),
-        f"{format_tokens(w_5h.tokens_remaining)} left ({w_5h.pct_used:.0f}% used)",
+        Colors.bold(_rem_color(w_5h.pct_remaining)(f"{round(w_5h.pct_remaining)}%")),
+        f"Gemini 5h ({w5_countdown})",
     )
     card2 = (
-        "5-HOUR REFRESH",
-        Colors.bold(Colors.cyan(w5_countdown)),
-        f"{format_tokens(w_5h.usage.total_tokens)} / {format_tokens(w_5h.limit_tokens)}",
-    )
-    card3 = (
         "WEEKLY REMAINING",
-        Colors.bold(rem_7d_color(f"{w_7d.pct_remaining:.0f}%")),
-        f"{format_tokens(w_7d.tokens_remaining)} left ({w_7d.pct_used:.0f}% used)",
+        Colors.bold(_rem_color(w_7d.pct_remaining)(f"{round(w_7d.pct_remaining)}%")),
+        f"Gemini Wk ({w7_countdown})",
+    )
+    claude_min_rem = min(claude_5h.pct_remaining, claude_7d.pct_remaining)
+    card3 = (
+        "CLAUDE & GPT QUOTA",
+        f"5h: {Colors.bold(_rem_color(claude_5h.pct_remaining)(f'{round(claude_5h.pct_remaining)}%'))} | Wk: {Colors.bold(_rem_color(claude_7d.pct_remaining)(f'{round(claude_7d.pct_remaining)}%'))}"
+        if tier_cfg.claude_weekly_limit > 0
+        else Colors.dim("N/A"),
+        f"5h resets {c5_countdown}" if claude_5h.is_exceeded else f"5h: {c5_countdown} ({format_cost(claude_7d.estimated_cost)})",
     )
     card4 = (
-        "WEEKLY REFRESH",
-        Colors.bold(Colors.cyan(w7_countdown)),
-        f"{format_tokens(w_7d.usage.total_tokens)} / {format_tokens(w_7d.limit_tokens)}",
+        "GEMINI 4 ARGON",
+        Colors.bold(_rem_color(argon_7d.pct_remaining)(f"{round(argon_7d.pct_remaining)}%"))
+        if argon_7d.limit_tokens > 0
+        else Colors.dim("N/A"),
+        f"{format_tokens(argon_7d.usage.total_tokens)} used ({argon_countdown})"
+        if argon_7d.limit_tokens > 0
+        else "Unavailable on Free tier",
     )
     print(render_kpi_grid([card1, card2, card3, card4], card_width=28))
     print()
 
-    # 2. Five Hour Limit Remaining Details
-    print(Colors.bold(Colors.cyan("── FIVE HOUR LIMIT REMAINING (Gemini Models) " + "─" * 35)))
-    w5_start = w_5h.start_time.strftime("%Y-%m-%d %H:%M:%S")
-    w5_end = w_5h.end_time.strftime("%H:%M:%S")
-    bar_5h = render_gauge_bar(w_5h.pct_used, width=24)
-    print(f"  {Colors.bold('Limit Remaining:')}  {bar_5h} {format_percent(w_5h.pct_remaining)} Remaining ({format_percent(w_5h.pct_used)} Used)")
-    print(f"  {Colors.bold('Quota Balance:')}    {format_tokens(w_5h.tokens_remaining)} remaining of {format_tokens(w_5h.limit_tokens)} allowance")
-    print(f"  {Colors.bold('Tokens Consumed:')}  {format_tokens(w_5h.usage.total_tokens)} total ({format_tokens(w_5h.usage.billable_tokens)} billable, {format_tokens(w_5h.usage.cached_tokens)} cached @ {format_percent(w_5h.usage.cache_hit_rate)} hit rate)")
-    print(f"  {Colors.bold('Activity Volume:')}  {w_5h.step_count} turns across {w_5h.session_count} session(s) ({format_cost(w_5h.estimated_cost)})")
+    def _format_refresh_status(w, window_type: str = "weekly", peer_5h=None) -> str:
+        if peer_5h is not None and peer_5h.is_exceeded and peer_5h.refresh_time:
+            secs_5h = max(0.0, (peer_5h.refresh_time - now_dt).total_seconds())
+            return Colors.red(
+                f"You have hit your 5-hour limit, so the weekly limit does not currently apply. Your 5-hour limit will refresh in {format_duration_verbose(secs_5h)}."
+            )
+        if w.is_exceeded and w.refresh_time:
+            secs = max(0.0, (w.refresh_time - now_dt).total_seconds())
+            return Colors.red(
+                f"You have hit your {window_type} limit, it will refresh in {format_duration_verbose(secs)}. If on a supported paid plan, you can use AI credits in the interim."
+            )
+        if w.refresh_time and (w.usage.total_tokens > 0 or w.pct_used > 0):
+            secs = (w.refresh_time - now_dt).total_seconds()
+            if secs > 0:
+                color_fn = Colors.yellow if window_type == "5-hour" else Colors.cyan
+                return color_fn(
+                    f"You have used some of your {window_type} limit, it will fully refresh in {format_duration_verbose(secs)}."
+                )
+        if w.server_description:
+            return Colors.cyan(w.server_description)
+        return Colors.green(f"100% capacity available (no active {window_type} usage in current cycle).")
 
-    # Refresh countdown
-    if w_5h.refresh_time and w_5h.usage.total_tokens > 0:
-        secs_left = (w_5h.refresh_time - datetime.now()).total_seconds()
-        if secs_left > 0:
-            refresh_time_str = w_5h.refresh_time.strftime("%H:%M:%S")
-            print(f"  {Colors.bold('Refresh Status:')}   {Colors.yellow(f'You have used some of your 5-hour limit, it will fully refresh in {format_duration_verbose(secs_left)}')} (at {refresh_time_str})")
-        else:
-            print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('100% capacity available (no active turns in the last 5 hours)')}")
-    else:
-        print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('100% capacity available (no active turns in the last 5 hours)')}")
+    # 2. Group 1: Gemini Models (Weekly + 5-Hour, matching UI order)
+    print(Colors.bold(Colors.cyan("── GEMINI MODELS (Gemini Flash & Gemini Pro) " + "─" * 36)))
+    bar_7d = render_remaining_bar(w_7d.pct_remaining, width=24)
+    bar_5h = render_remaining_bar(w_5h.pct_remaining, width=24)
+    print(f"  {Colors.bold('Weekly Limit Remaining:')}     {bar_7d} {Colors.bold(f'{round(w_7d.pct_remaining)}%')} ({format_percent(w_7d.pct_remaining)} exact | {format_percent(w_7d.pct_used)} used)")
+    print(f"    {Colors.dim('↳')} {_format_refresh_status(w_7d, 'weekly', peer_5h=w_5h)}")
+    print(f"  {Colors.bold('Five Hour Limit Remaining:')}  {bar_5h} {Colors.bold(f'{round(w_5h.pct_remaining)}%')} ({format_percent(w_5h.pct_remaining)} exact | {format_percent(w_5h.pct_used)} used)")
+    print(f"    {Colors.dim('↳')} {_format_refresh_status(w_5h, '5-hour')}")
+    print(f"  {Colors.bold('Weekly Tokens Consumed:')}     {format_tokens(w_7d.usage.total_tokens)} total ({format_tokens(w_7d.usage.billable_tokens)} billable, {format_tokens(w_7d.usage.cached_tokens)} cached @ {format_percent(w_7d.usage.cache_hit_rate)} hit rate)")
+    print(f"  {Colors.bold('Activity Volume:')}            {w_7d.step_count} turns across {w_7d.session_count} session(s) this week ({format_cost(w_7d.estimated_cost)}) | 5h: {w_5h.step_count} turns ({format_cost(w_5h.estimated_cost)})")
     print()
 
-    # 3. Weekly Limit Remaining Details
-    print(Colors.bold(Colors.cyan("── WEEKLY LIMIT REMAINING (Gemini Models) " + "─" * 38)))
-    w7_start = w_7d.start_time.strftime("%Y-%m-%d %H:%M:%S")
-    w7_end = w_7d.end_time.strftime("%H:%M:%S")
-    bar_7d = render_gauge_bar(w_7d.pct_used, width=24)
-    print(f"  {Colors.bold('Limit Remaining:')}  {bar_7d} {format_percent(w_7d.pct_remaining)} Remaining ({format_percent(w_7d.pct_used)} Used)")
-    print(f"  {Colors.bold('Quota Balance:')}    {format_tokens(w_7d.tokens_remaining)} remaining of {format_tokens(w_7d.limit_tokens)} allowance")
-    print(f"  {Colors.bold('Tokens Consumed:')}  {format_tokens(w_7d.usage.total_tokens)} total ({format_tokens(w_7d.usage.billable_tokens)} billable, {format_tokens(w_7d.usage.cached_tokens)} cached @ {format_percent(w_7d.usage.cache_hit_rate)} hit rate)")
-    print(f"  {Colors.bold('Activity Volume:')}  {w_7d.step_count} turns across {w_7d.session_count} session(s) ({format_cost(w_7d.estimated_cost)})")
-
-    if w_7d.refresh_time and w_7d.usage.total_tokens > 0:
-        secs_left_7d = (w_7d.refresh_time - datetime.now()).total_seconds()
-        if secs_left_7d > 0:
-            print(f"  {Colors.bold('Refresh Status:')}   {Colors.cyan(f'You have used some of your weekly limit, it will fully refresh in {format_duration_verbose(secs_left_7d)}.')}")
-        else:
-            print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('Weekly limit is currently at full capacity')}")
+    # 3. Group 2: Claude and GPT models (Weekly + 5-Hour, matching UI order)
+    print(Colors.bold(Colors.cyan("── CLAUDE AND GPT MODELS (Claude Opus, Claude Sonnet & GPT-OSS) " + "─" * 17)))
+    if tier_cfg.claude_weekly_limit <= 0 and tier_cfg.name == "free":
+        print(f"  {Colors.bold('Availability:')}               {Colors.yellow('Claude and GPT partner models require Google AI Pro or Ultra.')}")
     else:
-        print(f"  {Colors.bold('Refresh Status:')}   {Colors.green('Weekly limit is currently at full capacity (100% available)')}")
+        bar_c7 = render_remaining_bar(claude_7d.pct_remaining, width=24)
+        bar_c5 = render_remaining_bar(claude_5h.pct_remaining, width=24)
+        print(f"  {Colors.bold('Weekly Limit Remaining:')}     {bar_c7} {Colors.bold(f'{round(claude_7d.pct_remaining)}%')} ({format_percent(claude_7d.pct_remaining)} exact | {format_percent(claude_7d.pct_used)} used)")
+        print(f"    {Colors.dim('↳')} {_format_refresh_status(claude_7d, 'weekly', peer_5h=claude_5h)}")
+        print(f"  {Colors.bold('Five Hour Limit Remaining:')}  {bar_c5} {Colors.bold(f'{round(claude_5h.pct_remaining)}%')} ({format_percent(claude_5h.pct_remaining)} exact | {format_percent(claude_5h.pct_used)} used)")
+        print(f"    {Colors.dim('↳')} {_format_refresh_status(claude_5h, '5-hour')}")
+        print(f"  {Colors.bold('Weekly Tokens Consumed:')}     {format_tokens(claude_7d.usage.total_tokens)} total ({format_tokens(claude_7d.usage.billable_tokens)} billable, {format_tokens(claude_7d.usage.cached_tokens)} cached @ {format_percent(claude_7d.usage.cache_hit_rate)} hit rate)")
+        print(f"  {Colors.bold('Activity Volume:')}            {claude_7d.step_count} turns across {claude_7d.session_count} session(s) this week ({format_cost(claude_7d.estimated_cost)}) | 5h: {claude_5h.step_count} turns ({format_cost(claude_5h.estimated_cost)})")
     print()
 
-    # 4. Tier Comparison Table
-    t_headers = ["Tier", "5-Hour Cap", "Weekly Cap", "Models Supported", "Status"]
+    # 4. Group 3: Gemini 4 Argon (Weekly-Only Pool)
+    print(Colors.bold(Colors.cyan("── GEMINI 4 ARGON (Separate Weekly Quota Pool — No 5-Hour Limit) " + "─" * 16)))
+    if argon_7d.limit_tokens <= 0 and tier_cfg.name == "free":
+        print(f"  {Colors.bold('Availability:')}               {Colors.yellow('Gemini 4 Argon is not available on the Free tier (requires Google AI Pro or Ultra).')}")
+    else:
+        bar_argon = render_remaining_bar(argon_7d.pct_remaining, width=24)
+        print(f"  {Colors.bold('Gemini 4 Argon Weekly Limit:')} {bar_argon} {Colors.bold(f'{round(argon_7d.pct_remaining)}%')} ({format_percent(argon_7d.pct_remaining)} exact | {format_percent(argon_7d.pct_used)} used)")
+        print(f"    {Colors.dim('↳')} {_format_refresh_status(argon_7d, 'weekly')}")
+        print(f"  {Colors.bold('Weekly Quota Balance:')}       {format_tokens(argon_7d.tokens_remaining)} remaining of ~{format_tokens(argon_7d.limit_tokens)} effective weekly allowance ({format_cost(argon_7d.estimated_cost)} / {format_cost(tier_cfg.argon_weekly_cost_usd)} cost cap)")
+        print(f"  {Colors.bold('Weekly Tokens Consumed:')}     {format_tokens(argon_7d.usage.total_tokens)} total ({format_tokens(argon_7d.usage.billable_tokens)} billable, {format_tokens(argon_7d.usage.cached_tokens)} cached @ {format_percent(argon_7d.usage.cache_hit_rate)} hit rate)")
+        print(f"  {Colors.bold('Activity Volume:')}            {argon_7d.step_count} turns across {argon_7d.session_count} session(s) ({format_cost(argon_7d.estimated_cost)})")
+    print()
+
+    # 5. Tier Comparison Table
+    t_headers = ["Tier", "Gemini 5h Cap", "Gemini Weekly Cap", "Argon Weekly Cap", "Claude & GPT Weekly", "Models Supported", "Status"]
     t_rows = []
     for k, t_item in TIERS.items():
         is_active = (k == tier_cfg.name)
         status_cell = Colors.bold(Colors.green("● ACTIVE")) if is_active else Colors.dim("Available")
         t_rows.append([
             Colors.bold(t_item.name.upper()),
-            format_tokens(t_item.five_hour_limit),
-            format_tokens(t_item.weekly_limit),
-            "Flash only" if k == "free" else ("Flash + Pro" if k == "pro" else "All Models"),
+            f"~{format_tokens(t_item.five_hour_limit)} ({format_cost(t_item.five_hour_cost_usd)})",
+            f"~{format_tokens(t_item.weekly_limit)} ({format_cost(t_item.weekly_cost_usd)})",
+            f"~{format_tokens(t_item.argon_weekly_limit)} ({format_cost(t_item.argon_weekly_cost_usd)})" if t_item.argon_weekly_limit > 0 else "N/A",
+            f"~{format_tokens(t_item.claude_weekly_limit)} ({format_cost(t_item.claude_weekly_cost_usd)})" if t_item.claude_weekly_limit > 0 else "N/A",
+            "Flash only" if k == "free" else ("Gemini + Argon + Claude/GPT" if k == "pro" else "All Models (5x Quota)"),
             status_cell,
         ])
-    print(render_table(t_headers, t_rows, alignments=["left", "right", "right", "left", "center"], title="ANTIGRAVITY TIER LIMITS"))
+    print(render_table(t_headers, t_rows, alignments=["left", "right", "right", "right", "right", "left", "center"], title="ANTIGRAVITY TIER LIMITS"))
     print()
-    print(Colors.dim("💡 Tip: The 5-hour limit refreshes rolling sprint capacity every 5 hours."))
-    print(Colors.dim("   If you hit the weekly hard cap, Google locks out the agent until the 7-day cycle clears."))
-    print(Colors.dim("   Use lighter Flash models and plan-first agent prompts to maximize quota efficiency."))
+    print(Colors.dim("💡 Tip: Within each group, quota is consumed proportionally to the USD cost of the tokens."))
+    print(Colors.dim("   Gemini 4 Argon uses an independent weekly-only quota pool (no 5-hour limit)."))
+    print(Colors.dim("   Claude & GPT partner models share their own 5-hour and weekly quota pool."))
 
 
 def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
@@ -999,31 +1095,47 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     tier = getattr(args, "tier", "pro") or "pro"
     custom_5h = parse_token_amount(getattr(args, "five_h_limit", None))
     custom_weekly = parse_token_amount(getattr(args, "weekly_limit", None))
-
-    w_5h, w_7d, tier_cfg = LimitsCalculator.compute(
-        sessions, tier_name=tier, five_h_limit=custom_5h, weekly_limit=custom_weekly
-    )
+    custom_argon_weekly = parse_token_amount(getattr(args, "argon_weekly_limit", None))
+    argon_rem_pct = getattr(args, "argon_remaining_pct", None)
 
     now = datetime.now()
-    s5 = (w_5h.refresh_time - now).total_seconds() if (w_5h.refresh_time and w_5h.usage.total_tokens > 0) else 0
+    pools = LimitsCalculator.compute_all_pools(
+        sessions,
+        tier_name=tier,
+        five_h_limit=custom_5h,
+        weekly_limit=custom_weekly,
+        argon_weekly_limit=custom_argon_weekly,
+        argon_remaining_pct=argon_rem_pct,
+        now=now,
+    )
+    w_5h = pools.gemini_5h
+    w_7d = pools.gemini_7d
+    argon_7d = pools.argon_7d
+    claude_5h = pools.claude_5h
+    claude_7d = pools.claude_7d
+    tier_cfg = pools.tier
+
+    s5 = (w_5h.refresh_time - now).total_seconds() if (w_5h.refresh_time and (w_5h.usage.total_tokens > 0 or w_5h.pct_used > 0)) else 0
     rec_5h = f"in {format_duration(s5)}" if s5 > 0 else "Ready"
 
-    s7 = (w_7d.refresh_time - now).total_seconds() if (w_7d.refresh_time and w_7d.usage.total_tokens > 0) else 0
+    s7 = (w_7d.refresh_time - now).total_seconds() if (w_7d.refresh_time and (w_7d.usage.total_tokens > 0 or w_7d.pct_used > 0)) else 0
     rec_7d = f"in {format_duration(s7)}" if s7 > 0 else "Ready"
+
+    s_argon = (argon_7d.refresh_time - now).total_seconds() if (argon_7d.refresh_time and (argon_7d.usage.total_tokens > 0 or argon_7d.pct_used > 0)) else 0
+    rec_argon = f"in {format_duration(s_argon)}" if s_argon > 0 else "Ready"
 
     rem_5h = round(w_5h.pct_remaining)
     rem_7d = round(w_7d.pct_remaining)
+    rem_argon = round(argon_7d.pct_remaining)
+    rem_claude_5h = round(claude_5h.pct_remaining)
+    rem_claude_7d = round(claude_7d.pct_remaining)
 
-    # Today's consumption
+    # Today's consumption (priced per step across all models used today)
     daily = UsageAggregator.aggregate_daily(sessions)
     today_usage = daily.get(now.date())
     if today_usage:
         tok_today = today_usage.usage.total_tokens
-        _, _, _, cost_today = calculate_cost(
-            today_usage.usage.prompt_tokens,
-            today_usage.usage.cached_tokens,
-            today_usage.usage.output_tokens,
-        )
+        cost_today = today_usage.cost.total
     else:
         tok_today = 0
         cost_today = 0.0
@@ -1032,19 +1144,37 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     cost_today_str = format_cost(cost_today)
 
     # Health status level & badge
-    if rem_5h <= 0 or rem_7d <= 0 or w_5h.is_exceeded or w_7d.is_exceeded:
+    argon_active = argon_7d.usage.total_tokens > 0 or argon_7d.pct_used > 0
+    claude_active = claude_7d.usage.total_tokens > 0 or claude_7d.pct_used > 0
+    argon_exceeded = argon_active and argon_7d.is_exceeded
+    claude_exceeded = claude_active and (claude_5h.is_exceeded or claude_7d.is_exceeded)
+    if (
+        rem_5h <= 0
+        or rem_7d <= 0
+        or w_5h.is_exceeded
+        or w_7d.is_exceeded
+        or argon_exceeded
+        or claude_exceeded
+    ):
         badge = "🔴"
         badge_plain = "[ALERT]"
         level = "critical"
-        color_5h = Colors.red
-        color_7d = Colors.red
+        color_5h = Colors.red if rem_5h <= 0 else Colors.green
+        color_7d = Colors.red if rem_7d <= 0 else Colors.green
+        color_argon = Colors.red if rem_argon <= 0 else (Colors.yellow if rem_argon < 20 else Colors.green)
         tmux_color = "red"
-    elif rem_5h < 20 or rem_7d < 20:
+    elif (
+        rem_5h < 20
+        or rem_7d < 20
+        or (argon_active and rem_argon < 20)
+        or (claude_active and (rem_claude_5h < 20 or rem_claude_7d < 20))
+    ):
         badge = "🟡"
         badge_plain = "[WARN]"
         level = "warning"
         color_5h = Colors.yellow if rem_5h < 20 else Colors.green
         color_7d = Colors.yellow if rem_7d < 20 else Colors.green
+        color_argon = Colors.yellow if rem_argon < 20 else Colors.green
         tmux_color = "yellow"
     else:
         badge = "🟢"
@@ -1052,6 +1182,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         level = "healthy"
         color_5h = Colors.green
         color_7d = Colors.green
+        color_argon = Colors.green
         tmux_color = "green"
 
     # JSON export
@@ -1069,6 +1200,10 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             "weekly_refresh": rec_7d,
             "weekly_used_tokens": w_7d.usage.total_tokens,
             "weekly_limit_tokens": w_7d.limit_tokens,
+            "argon_weekly_pct": rem_argon,
+            "argon_weekly_refresh": rec_argon,
+            "argon_weekly_used_tokens": argon_7d.usage.total_tokens,
+            "argon_weekly_limit_tokens": argon_7d.limit_tokens,
             "today_tokens": tok_today,
             "today_tokens_str": tok_today_str,
             "today_cost_usd": round(cost_today, 4),
@@ -1088,6 +1223,8 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             "{5h_refresh}": rec_5h,
             "{wk_pct}": f"{rem_7d}",
             "{wk_refresh}": rec_7d,
+            "{argon_pct}": f"{rem_argon}",
+            "{argon_refresh}": rec_argon,
             "{today_tokens}": tok_today_str,
             "{today_cost}": cost_today_str,
             "{tier}": tier_cfg.name,
@@ -1097,11 +1234,15 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         print(res)
         return
 
+    has_argon = argon_7d.usage.total_tokens > 0
+
     # Tmux mode
     if getattr(args, "tmux", False):
+        argon_seg = f"#[fg=colour238]| #[fg=white]Ar: {rem_argon}% #[fg=colour244]({rec_argon}) " if has_argon else ""
         print(
             f"#[fg={tmux_color}]● #[fg=white]5h: {rem_5h}% #[fg=colour244]({rec_5h}) "
             f"#[fg=colour238]| #[fg=white]Wk: {rem_7d}% #[fg=colour244]({rec_7d}) "
+            f"{argon_seg}"
             f"#[fg=colour238]| #[fg=white]Today: {tok_today_str} #[fg=green]({cost_today_str})"
         )
         return
@@ -1110,18 +1251,23 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     is_plain = getattr(args, "plain", False) or not Colors.enabled() or getattr(args, "no_color", False)
     if is_plain:
         if getattr(args, "short", False):
-            print(f"{badge_plain} 5h:{rem_5h}% Wk:{rem_7d}% {cost_today_str}")
+            argon_short = f" Ar:{rem_argon}%" if has_argon else ""
+            print(f"{badge_plain} 5h:{rem_5h}% Wk:{rem_7d}%{argon_short} {cost_today_str}")
         else:
-            print(f"{badge_plain} 5h: {rem_5h}% ({rec_5h}) | Wk: {rem_7d}% ({rec_7d}) | Today: {tok_today_str} ({cost_today_str})")
+            argon_part = f" | Ar: {rem_argon}% ({rec_argon})" if has_argon else ""
+            print(f"{badge_plain} 5h: {rem_5h}% ({rec_5h}) | Wk: {rem_7d}% ({rec_7d}){argon_part} | Today: {tok_today_str} ({cost_today_str})")
         return
 
     # Default ANSI Colored mode
     if getattr(args, "short", False):
-        print(f"{badge} {color_5h(f'5h:{rem_5h}%')} {color_7d(f'Wk:{rem_7d}%')} {Colors.green(cost_today_str)}")
+        argon_short = f" {color_argon(f'Ar:{rem_argon}%')}" if has_argon else ""
+        print(f"{badge} {color_5h(f'5h:{rem_5h}%')} {color_7d(f'Wk:{rem_7d}%')}{argon_short} {Colors.green(cost_today_str)}")
     else:
+        argon_part = f"{color_argon('Ar:')} {color_argon(f'{rem_argon}%')} {Colors.dim(f'({rec_argon})')} | " if has_argon else ""
         print(
             f"{badge} {color_5h('5h:')} {color_5h(f'{rem_5h}%')} {Colors.dim(f'({rec_5h})')} | "
             f"{color_7d('Wk:')} {color_7d(f'{rem_7d}%')} {Colors.dim(f'({rec_7d})')} | "
+            f"{argon_part}"
             f"Today: {tok_today_str} {Colors.green(f'({cost_today_str})')}"
         )
 

@@ -38,6 +38,7 @@ class UsageExporter:
                 "latest_date": summary["latest_date"],
                 "cache_hit_rate_pct": round(summary["cache_hit_rate"], 2),
                 "total_usage": summary["total_usage"].to_dict(),
+                "total_cost": summary["total_cost"].to_dict(),
             },
             "models": [m.to_dict() for m in models],
             "monthly": [m.to_dict() for m in monthly],
@@ -70,6 +71,7 @@ class UsageExporter:
             "Thought Tokens",
             "Total Tokens",
             "Cache Hit Rate (%)",
+            "Estimated Cost (USD)",
         ])
 
         for s in sessions:
@@ -90,6 +92,7 @@ class UsageExporter:
                 u.thought_tokens,
                 u.total_tokens,
                 round(u.cache_hit_rate, 2),
+                round(s.cost.total, 4),
             ])
 
         return output.getvalue()

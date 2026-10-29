@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
-from agy_usage.models import SessionSummary, StepRecord, TokenUsage
+from agy_usage.models import SessionSummary, StepRecord, TokenUsage, normalize_model_name
 
 
 def decode_varint(data: bytes, idx: int) -> Tuple[int, int]:
@@ -89,6 +89,72 @@ def parse_timestamp_proto(data: bytes) -> Optional[datetime]:
                 break
         if seconds > 0:
             return datetime.fromtimestamp(seconds)
+    except Exception:
+        pass
+    return None
+
+
+# Known Antigravity model_enum IDs (both the raw M<num> suffix and the 1000+<num>
+# integer stored in UsageMetadata field 1). Session-local gen_metadata overrides these.
+KNOWN_MODEL_ENUMS: Dict[int, str] = {
+    18: "gemini-3-flash",
+    1018: "gemini-3-flash",
+    19: "gemini-2.5-flash-lite",
+    1019: "gemini-2.5-flash-lite",
+    20: "gemini-3.5-flash",
+    1020: "gemini-3.5-flash",
+    21: "gemini-3.1-flash",
+    1021: "gemini-3.1-flash",
+    28: "gemini-2.5-flash-lite",
+    1028: "gemini-2.5-flash-lite",
+    50: "gemini-3.1-flash-lite",
+    1050: "gemini-3.1-flash-lite",
+    84: "gemini-3.5-flash",
+    1084: "gemini-3.5-flash",
+    187: "gemini-3.5-flash",
+    1187: "gemini-3.5-flash",
+    198: "gemini-3.5-flash-lite",
+    1198: "gemini-3.5-flash-lite",
+    298: "gemini-3.7-flash",
+    1298: "gemini-3.7-flash",
+    299: "gemini-3.7-flash",
+    1299: "gemini-3.7-flash",
+    318: "gemini-3.8-flash",
+    1318: "gemini-3.8-flash",
+    319: "gemini-3.8-flash",
+    1319: "gemini-3.8-flash",
+    320: "gemini-3.8-flash",
+    1320: "gemini-3.8-flash",
+    322: "gemini-3.8-flash",
+    1322: "gemini-3.8-flash",
+    400: "claude-opus-5-5-low",
+    1400: "claude-opus-5-5-low",
+    401: "claude-opus-5-5-medium",
+    1401: "claude-opus-5-5-medium",
+    402: "claude-opus-5-5-high",
+    1402: "claude-opus-5-5-high",
+    403: "claude-sonnet-5-5-low",
+    1403: "claude-sonnet-5-5-low",
+    404: "claude-sonnet-5-5-medium",
+    1404: "claude-sonnet-5-5-medium",
+    405: "claude-sonnet-5-5-high",
+    1405: "claude-sonnet-5-5-high",
+    417: "gemini-4-argon-trial",
+    1417: "gemini-4-argon-trial",
+    418: "gemini-4-argon-trial",
+    1418: "gemini-4-argon-trial",
+    419: "gemini-4-argon-trial",
+    1419: "gemini-4-argon-trial",
+}
+
+
+
+def extract_usage_model_enum(data: bytes) -> Optional[int]:
+    """Extract the model enum integer stored in UsageMetadata field 1, if present."""
+    try:
+        for fnum, _, val in parse_proto_fields(data):
+            if fnum == 1 and isinstance(val, int) and val > 0:
+                return val
     except Exception:
         pass
     return None
@@ -243,21 +309,27 @@ class AntigravityParser:
             # 2. Extract Models and Step-to-Model Mapping from gen_metadata
             step_to_model: Dict[int, str] = {}
             known_models: Set[str] = set()
+            enum_to_model: Dict[int, str] = dict(KNOWN_MODEL_ENUMS)
+            gm_rows: List[Tuple[int, str, Optional[int]]] = []
             if "gen_metadata" in tables:
                 try:
-                    cursor.execute("SELECT idx, data FROM gen_metadata WHERE size > 0")
+                    cursor.execute("SELECT idx, data FROM gen_metadata WHERE size > 0 ORDER BY idx ASC")
                     for row_idx, data in cursor.fetchall():
                         if not data:
                             continue
                         g_fields = parse_proto_fields(data)
                         model_name = ""
+                        model_enum_num: Optional[int] = None
+                        model_enum_raw = ""
                         last_step_idx = -1
                         for gf, gw, gv in g_fields:
                             if gf == 1 and isinstance(gv, bytes):
                                 f1_fields = parse_proto_fields(gv)
                                 for f1_f, f1_w, f1_v in f1_fields:
                                     if f1_f == 19 and isinstance(f1_v, bytes):
-                                        m_str = f1_v.decode("utf-8", errors="ignore").strip()
+                                        m_str = normalize_model_name(
+                                            f1_v.decode("utf-8", errors="ignore").strip()
+                                        )
                                         if m_str:
                                             model_name = m_str
                                             known_models.add(m_str)
@@ -280,25 +352,43 @@ class AntigravityParser:
                                         )
                                         if key_str == "last_step_index" and val_str.isdigit():
                                             last_step_idx = int(val_str)
-                                        elif (
-                                            key_str == "model_enum"
-                                            and not model_name
-                                            and val_str
-                                        ):
-                                            # Friendly fallback for model_enum
-                                            model_name = val_str.replace("MODEL_PLACEHOLDER_", "")
+                                        elif key_str == "model_enum" and val_str:
+                                            model_enum_raw = val_str.replace("MODEL_PLACEHOLDER_", "")
+                                            num_str = model_enum_raw.lstrip("Mm")
+                                            if num_str.isdigit():
+                                                model_enum_num = int(num_str)
 
-                        if model_name and last_step_idx >= 0:
-                            # Map nearby model step (last_step_index + 1 is typically the response step)
-                            step_to_model[last_step_idx] = model_name
-                            step_to_model[last_step_idx + 1] = model_name
+                        if model_name and model_enum_num is not None:
+                            enum_to_model[model_enum_num] = model_name
+                            enum_to_model[1000 + model_enum_num] = model_name
+
+                        gm_rows.append((last_step_idx, model_name or model_enum_raw, model_enum_num))
+
+                    # Second pass so rows that only recorded model_enum (without field 19)
+                    # inherit the human-readable model name discovered in the same session.
+                    for last_step_idx, raw_name, enum_num in gm_rows:
+                        resolved = raw_name
+                        if (not resolved or resolved.startswith("M")) and enum_num is not None:
+                            resolved = enum_to_model.get(enum_num, resolved)
+                        resolved = normalize_model_name(resolved)
+                        if resolved and not resolved.startswith("M"):
+                            known_models.add(resolved)
+                        if resolved and last_step_idx >= 0:
+                            step_to_model[last_step_idx] = resolved
+                            step_to_model[last_step_idx + 1] = resolved
                 except Exception:
                     pass
+
+            gm_anchors: List[Tuple[int, str]] = sorted(
+                (idx_anchor, m_name)
+                for idx_anchor, m_name in step_to_model.items()
+                if m_name
+            )
 
             default_model = (
                 sorted(list(known_models))[0]
                 if known_models
-                else "gemini-3.7-flash"
+                else "gemini-3.8-flash"
             )
 
             # 3. Extract Session Title from initial steps
@@ -356,6 +446,7 @@ class AntigravityParser:
             # 4. Extract Step Records and Token Usage
             steps: List[StepRecord] = []
             aggregated_usage = TokenUsage()
+            model_token_totals: Dict[str, int] = {}
             first_ts: Optional[datetime] = start_time_blob
             last_ts: Optional[datetime] = None
 
@@ -399,8 +490,28 @@ class AntigravityParser:
                 if last_ts is None or step_ts > last_ts:
                     last_ts = step_ts
 
-                # Identify Model for this step
-                step_model = step_to_model.get(idx, default_model)
+                # Identify Model for this step:
+                # 1) Direct gen_metadata last_step_index anchor
+                # 2) UsageMetadata field 1 model_enum integer
+                # 3) Most recent preceding gen_metadata anchor in this session
+                # 4) Session default model
+                step_model = step_to_model.get(idx, "")
+                if not step_model:
+                    u_enum = extract_usage_model_enum(usage_raw)
+                    if u_enum is not None and u_enum in enum_to_model:
+                        step_model = enum_to_model[u_enum]
+                if not step_model and gm_anchors:
+                    for anchor_idx, anchor_model in reversed(gm_anchors):
+                        if anchor_idx <= idx:
+                            step_model = anchor_model
+                            break
+                if not step_model:
+                    step_model = default_model
+
+                known_models.add(step_model)
+                model_token_totals[step_model] = (
+                    model_token_totals.get(step_model, 0) + step_usage.total_tokens
+                )
 
                 step_rec = StepRecord(
                     step_idx=idx,
@@ -411,8 +522,15 @@ class AntigravityParser:
                 steps.append(step_rec)
                 aggregated_usage = aggregated_usage.add(step_usage)
 
-            # Assemble session summary
-            models_list = sorted(list(known_models)) if known_models else [default_model]
+            # Assemble session summary — order models by token volume descending so
+            # primary_model (models[0]) is the dominant model of the session.
+            if known_models:
+                models_list = sorted(
+                    known_models,
+                    key=lambda m: (-model_token_totals.get(m, 0), m),
+                )
+            else:
+                models_list = [default_model]
             summary = SessionSummary(
                 session_id=session_id,
                 source=source,

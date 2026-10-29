@@ -280,6 +280,38 @@ def strip_ansi(text: str) -> str:
     return ansi_pattern.sub("", text)
 
 
+def truncate_ansi(text: str, max_visible: int) -> str:
+    """Truncate a string to max_visible printable characters while preserving ANSI codes."""
+    if max_visible <= 0:
+        return ""
+    vis_len = len(strip_ansi(text))
+    if vis_len <= max_visible:
+        return text
+
+    import re
+    ansi_pattern = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    target_chars = max(0, max_visible - 1)
+    out: List[str] = []
+    vis_count = 0
+    has_ansi = False
+    pos = 0
+    while pos < len(text) and vis_count < target_chars:
+        m = ansi_pattern.match(text, pos)
+        if m:
+            out.append(m.group(0))
+            has_ansi = True
+            pos = m.end()
+        else:
+            out.append(text[pos])
+            vis_count += 1
+            pos += 1
+
+    if has_ansi:
+        out.append(Colors.RESET)
+    out.append("…")
+    return "".join(out)
+
+
 def render_kpi_card(title: str, value: str, subtext: str = "", width: int = 26) -> str:
     """Render a single boxed KPI stat card with strict width alignment."""
     h_line = "─" * (width - 2)
@@ -287,12 +319,10 @@ def render_kpi_card(title: str, value: str, subtext: str = "", width: int = 26) 
     bot = f"└{h_line}┘"
 
     def pad_line(content: str) -> str:
-        vis_len = len(strip_ansi(content))
         max_content = width - 4
-        if vis_len > max_content:
-            content = content[: max_content - 1] + "…"
-            vis_len = max_content
-        padding = " " * (width - 3 - vis_len)
+        content = truncate_ansi(content, max_content)
+        vis_len = len(strip_ansi(content))
+        padding = " " * max(0, width - 3 - vis_len)
         return f"│ {content}{padding}│"
 
     return "\n".join([top, pad_line(title), pad_line(value), pad_line(subtext), bot])
@@ -304,11 +334,11 @@ def render_kpi_grid(cards: List[Tuple[str, str, str]], card_width: int = 26) -> 
         return ""
 
     import shutil
-    term_cols = shutil.get_terminal_size((100, 24)).columns
-    if len(cards) == 4 and term_cols < (4 * (card_width + 2)):
+    term_cols = shutil.get_terminal_size((120, 24)).columns
+    if len(cards) == 4 and term_cols < (4 * card_width + 6):
         cards_per_row = 2
     else:
-        cards_per_row = max(1, term_cols // (card_width + 2))
+        cards_per_row = max(1, (term_cols + 2) // (card_width + 2))
         cards_per_row = min(cards_per_row, len(cards))
 
     chunks = [cards[i : i + cards_per_row] for i in range(0, len(cards), cards_per_row)]
