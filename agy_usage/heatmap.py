@@ -61,8 +61,9 @@ class HeatmapColor:
     def cell(cls, level: int, char: str = "■") -> str:
         """Render a single colored cell."""
         if not cls.supports_color():
+            level = max(0, min(4, level))
             symbols = ["·", "░", "▒", "▓", "█"]
-            return symbols[min(level, 4)]
+            return symbols[level]
 
         level = max(0, min(4, level))
         if cls.supports_truecolor():

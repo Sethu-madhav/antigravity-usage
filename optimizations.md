@@ -16,7 +16,7 @@ Performance ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `
 | OPT-004 | 🟡 | ⬜ | `aggregator.py:64,97,177` | `aggregate_daily` recomputed about 3x per run, about 7x per JSON export | — |
 | OPT-005 | 🟡 | ⬜ | `limits.py:654-735` | `_collect_pool_items` called 3x, each call re-walking every step through `classify_model_pool` | — |
 | OPT-006 | 🟡 | ⬜ | `parser.py:503-507` | Linear reverse scan over model anchors per step, O(n·m) overall | — |
-| OPT-007 | 🟡 | ⬜ | `display.py:276-292` | ANSI regex recompiled per table cell | — |
+| OPT-007 | 🟡 | ⬜ | `display.py:293,306` | ANSI regex recompiled per table cell | — |
 | OPT-008 | 🟡 | ⬜ | `parser.py:453-456` | `cursor.fetchall()` materializes every metadata blob before processing begins | — |
 
 ## Notes
