@@ -14,10 +14,13 @@
 
 | Category | Open | High | Med | Low |
 |----------|-----:|-----:|----:|----:|
-| 🐛 Bugs       | 23 | 5 | 9 | 9 |
+| 🐛 Bugs       | 22 | 3 | 10 | 9 |
 | ⚡ Optimizations | 8 | 1 | 3 | 4 |
 | 🔧 Improvements | 9 | 0 | 3 | 6 |
 | ✨ Feature ideas | 10 | — | — | — |
+
+> **Progress:** BUG-001 and BUG-002 fixed by PR #1 (merged, commit `44ecdc2`, merge of
+> `8b95649`, 2026-10-29). BUG-024 was created from its post-merge review.
 
 ---
 
@@ -25,8 +28,8 @@
 
 | ID  | Sev | Conf | Status | Location | Summary |
 |-----|-----|------|--------|----------|---------|
-| BUG-001 | 🔴 | A | ⬜ | `cli.py:87-95` | Global flags fail after subcommand |
-| BUG-002 | 🔴 | A | ⬜ | `cli.py:265-269, 319-323` | Root `--json/--csv` silently discarded before `limits`/`statusline` |
+| BUG-001 | 🔴 | A | ✅ | `cli.py:87-95` | Global flags fail after subcommand |
+| BUG-002 | 🔴 | A | ✅ | `cli.py:265-269, 319-323` | Root `--json/--csv` silently discarded before `limits`/`statusline` (parse-level clobber fixed; statusline `--csv` split out as BUG-024) |
 | BUG-003 | 🔴 | A | ⬜ | `limits.py:210-228` | `parse_token_amount` crashes on `inf`, accepts negatives |
 | BUG-004 | 🔴 | A | ⬜ | `cli.py` + `heatmap.py` | `--no-color` does not disable heatmap colors |
 | BUG-005 | 🔴 | B | ⬜ | `limits.py:375-382, 644-649` | Stale quota cache served as authoritative "Live" data (no TTL) |
@@ -48,6 +51,7 @@
 | BUG-021 | 🟡 | B | ⬜ | `display.py:42-45` | Nested color calls: inner `RESET` wipes outer attribute |
 | BUG-022 | 🟡 | B | ⬜ | `parser.py:240` | `--dir` path skips chronological re-sort (mtime vs start_time) |
 | BUG-023 | 🟠 | B | ⬜ | `setup.py` + `pyproject.toml` + `__init__.py` | Triplicated metadata/entry-point; no LICENSE file |
+| BUG-024 | 🟠 | A | ⬜ | `cli.py:1222` (`cmd_statusline`) | `statusline --csv` accepted but ignored: prints one-line text, exit 0 (found post-merge by Deepseek review of PR #1; cmd_statusline only reads `args.json`) |
 
 ### Details
 
@@ -178,6 +182,20 @@ is a third version source (feeds `-v`). Benign today (setuptools ≥61 prefers
 **Fix:** delete `setup.py`; single-source version via
 `dynamic = ["version"]` + `[tool.setuptools.dynamic] version = {attr = "agy_usage.__version__"}`;
 add LICENSE; use SPDX `license = "MIT"`.
+
+**BUG-024 · `statusline --csv` silently ignored · 🟠 A**
+Discovered by the Deepseek pre-release review of PR #1 (it examined the branch after the
+user merged it; verdict REQUEST CHANGES). `cmd_statusline` never reads `args.csv`, so both
+`agy-usage --csv statusline` and `agy-usage statusline --csv` render the normal one-line
+status text and exit 0. Pre-fix (b06314f) the invocation even parsed True already, which
+also makes the old test assertion `['--csv','statusline']` vacuous. Related review note:
+`main()`'s early global-export branch still preempts 9 of 11 subcommands when
+`--json/--csv` is set (that design predates this tracker; per-command JSON is FEAT-007 and
+the `live --json` gap is BUG-019).
+**Fix (choose one):** emit a one-row CSV from the computed pools the way `cmd_limits`
+does, or reject the flag (`error: --csv is not supported by 'statusline'` to stderr,
+exit 2) and drop `--csv` from statusline's help. Also drop or replace the vacuous
+`--csv statusline` parse assertion with a behavioral test on `main()`.
 
 ---
 
