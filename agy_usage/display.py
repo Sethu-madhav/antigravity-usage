@@ -46,11 +46,20 @@ class Colors:
 
     @classmethod
     def enabled(cls) -> bool:
+        """Auto-detect color support: TTY-gated, NO_COLOR-aware (BUG-009).
+
+        Enablement is decided ONLY by this method: colors turn on when stdout
+        is a real terminal and NO_COLOR is not set. COLORTERM must never flip
+        enablement here — a piped stdout (file, pipe, CI capture) with
+        COLORTERM exported by the parent shell (VS Code, Warp) stays plain.
+        COLORTERM's legitimate role is depth selection only, consulted by
+        HeatmapColor.supports_truecolor() to pick truecolor vs 256-color.
+        """
         if _COLOR_OVERRIDE is not None:
             return _COLOR_OVERRIDE
         if os.environ.get("NO_COLOR"):
             return False
-        return sys.stdout.isatty() or os.environ.get("COLORTERM") is not None
+        return sys.stdout.isatty()
 
     @classmethod
     def color(cls, text: str, code: str) -> str:
