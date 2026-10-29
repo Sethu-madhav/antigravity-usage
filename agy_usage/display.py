@@ -65,7 +65,11 @@ class Colors:
     def color(cls, text: str, code: str) -> str:
         if not cls.enabled():
             return text
-        return f"{code}{text}{cls.RESET}"
+        # Nested calls: drop the inner trailing RESET so we emit only one, and
+        # re-assert `code` after interior RESETs so they don't wipe the outer style.
+        body = text[: -len(cls.RESET)] if text.endswith(cls.RESET) else text
+        body = body.replace(cls.RESET, f"{cls.RESET}{code}")
+        return f"{code}{body}{cls.RESET}"
 
     @classmethod
     def bold(cls, text: str) -> str:
