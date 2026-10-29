@@ -94,17 +94,55 @@ Examples:
         "--no-color", action="store_true", help="Disable ANSI color output"
     )
 
+    # Shared flags accepted before OR after any subcommand. The subparser
+    # copies use default=argparse.SUPPRESS so an explicit root-level value
+    # (e.g. `agy-usage --json limits`) survives namespace merging instead of
+    # being clobbered by the subparser's own defaults.
+    common = argparse.ArgumentParser(add_help=False)
+    common_dir_group = common.add_argument_group("Data Source Options")
+    common_dir_group.add_argument(
+        "--dir",
+        dest="custom_dir",
+        metavar="PATH",
+        default=argparse.SUPPRESS,
+        help="Custom directory containing Antigravity conversation SQLite databases",
+    )
+    common_dir_group.add_argument(
+        "--cli-only",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Scan Antigravity CLI conversations directory only",
+    )
+    common_dir_group.add_argument(
+        "--ide-only",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Scan Antigravity IDE conversations directory only",
+    )
+    common_out_group = common.add_argument_group("Output Formatting")
+    common_out_group.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Output results as JSON"
+    )
+    common_out_group.add_argument(
+        "--csv", action="store_true", default=argparse.SUPPRESS, help="Output session summaries as CSV"
+    )
+    common_out_group.add_argument(
+        "--no-color", action="store_true", default=argparse.SUPPRESS, help="Disable ANSI color output"
+    )
+
     # Subcommands
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to run")
 
     # 1. overview / dashboard (default)
     sub_overview = subparsers.add_parser(
-        "overview", help="Dashboard overview with KPI cards and heatmap (default)"
+        "overview", help="Dashboard overview with KPI cards and heatmap (default)",
+        parents=[common],
     )
 
     # 2. heatmap
     sub_heatmap = subparsers.add_parser(
-        "heatmap", help="GitHub-style terminal contribution activity heatmap"
+        "heatmap", help="GitHub-style terminal contribution activity heatmap",
+        parents=[common],
     )
     sub_heatmap.add_argument(
         "-w",
@@ -128,7 +166,8 @@ Examples:
 
     # 3. sessions
     sub_sessions = subparsers.add_parser(
-        "sessions", help="List sessions with token and cache breakdown"
+        "sessions", help="List sessions with token and cache breakdown",
+        parents=[common],
     )
     sub_sessions.add_argument(
         "-n",
@@ -153,7 +192,8 @@ Examples:
 
     # 4. current
     sub_current = subparsers.add_parser(
-        "current", help="Show token usage totals for the most recent session"
+        "current", help="Show token usage totals for the most recent session",
+        parents=[common],
     )
     sub_current.add_argument(
         "--details",
@@ -171,7 +211,8 @@ Examples:
 
     # 5. session <id>
     sub_session = subparsers.add_parser(
-        "session", help="Inspect token usage totals for a specific session"
+        "session", help="Inspect token usage totals for a specific session",
+        parents=[common],
     )
     sub_session.add_argument(
         "session_id",
@@ -195,22 +236,23 @@ Examples:
 
     # 6. weekly
     subparsers.add_parser(
-        "weekly", help="Weekly token usage table and volume chart"
+        "weekly", help="Weekly token usage table and volume chart", parents=[common]
     )
 
     # 6. monthly
     subparsers.add_parser(
-        "monthly", help="Monthly token usage table and volume chart"
+        "monthly", help="Monthly token usage table and volume chart", parents=[common]
     )
 
     # 7. models
     subparsers.add_parser(
-        "models", help="Token breakdown and distribution by model"
+        "models", help="Token breakdown and distribution by model", parents=[common]
     )
 
     # 8. live / watch mode
     sub_live = subparsers.add_parser(
-        "live", help="Live watch mode: automatically refresh metrics"
+        "live", help="Live watch mode: automatically refresh metrics",
+        parents=[common],
     )
     sub_live.add_argument(
         "--interval",
@@ -221,7 +263,8 @@ Examples:
 
     # 9. limits
     sub_limits = subparsers.add_parser(
-        "limits", help="Show current 5-hour rolling limit and weekly quota limits"
+        "limits", help="Show current 5-hour rolling limit and weekly quota limits",
+        parents=[common],
     )
     sub_limits.add_argument(
         "--tier",
@@ -261,16 +304,11 @@ Examples:
         dest="claude_weekly_limit",
         help="Custom Claude weekly limit in tokens (e.g. 150M)",
     )
-    sub_limits.add_argument(
-        "--json", action="store_true", help="Output limits analysis as JSON"
-    )
-    sub_limits.add_argument(
-        "--csv", action="store_true", help="Output limits analysis as CSV"
-    )
 
     # 10. statusline
     sub_statusline = subparsers.add_parser(
-        "statusline", help="Compact single-line quota status for shell prompt or tmux"
+        "statusline", help="Compact single-line quota status for shell prompt or tmux",
+        parents=[common],
     )
     sub_statusline.add_argument(
         "--tier",
@@ -315,11 +353,6 @@ Examples:
         "--tmux",
         action="store_true",
         help="Format output using tmux color formatting directives (#[fg=...])",
-    )
-    sub_statusline.add_argument(
-        "--json",
-        action="store_true",
-        help="Output statusline metrics as JSON (ideal for Waybar/Polybar/Starship)",
     )
     sub_statusline.add_argument(
         "-f",
