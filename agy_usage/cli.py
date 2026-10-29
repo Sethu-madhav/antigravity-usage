@@ -6,7 +6,7 @@ import argparse
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 
 from agy_usage import __version__
 from agy_usage.aggregator import UsageAggregator
@@ -27,7 +27,6 @@ from agy_usage.heatmap import TerminalHeatmap
 from agy_usage.limits import (
     CRIT,
     TIERS,
-    WARN_HIGH,
     WARN_MODERATE,
     LimitsCalculator,
     WindowStats,
@@ -1181,7 +1180,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     cost_today_str = format_cost(cost_today)
 
     # Health status level & badge (BUG-012: aligned with limits via get_status_badge & shared thresholds)
-    badge, status_msg = get_status_badge(
+    badge, _ = get_status_badge(
         w_5h,
         w_7d,
         argon_7d=argon_7d,
@@ -1202,16 +1201,16 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         level = "healthy"
         tmux_color = "green"
 
-    def _color_for_window(rem: float, w: WindowStats) -> Any:
-        if rem <= (100.0 - CRIT) or w.is_exceeded or w.pct_used >= CRIT:
+    def _color_for_window(w: WindowStats) -> Callable[[str], str]:
+        if w.is_exceeded or w.pct_used >= CRIT:
             return Colors.red
-        if w.pct_used >= WARN_MODERATE or rem <= (100.0 - WARN_MODERATE):
+        if w.pct_used >= WARN_MODERATE:
             return Colors.yellow
         return Colors.green
 
-    color_5h = _color_for_window(rem_5h, w_5h)
-    color_7d = _color_for_window(rem_7d, w_7d)
-    color_argon = _color_for_window(rem_argon, argon_7d)
+    color_5h = _color_for_window(w_5h)
+    color_7d = _color_for_window(w_7d)
+    color_argon = _color_for_window(argon_7d)
 
     # JSON export
     if getattr(args, "json", False):

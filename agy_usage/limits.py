@@ -831,6 +831,8 @@ def render_gauge_bar(pct: float, width: int = 24) -> str:
 
     bar_str = "█" * filled_chars + "░" * empty_chars
 
+    # Note: visual gauge bar color scale (>=85% red) is intentionally distinct from the
+    # status badge scale (CRIT=100% red) to provide advance visual tension in the progress bar.
     if pct >= 85.0:
         colored_bar = Colors.red(bar_str)
     elif pct >= WARN_MODERATE:

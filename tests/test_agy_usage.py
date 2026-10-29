@@ -1102,6 +1102,29 @@ class TestLimits(unittest.TestCase):
         self.assertEqual(data_100["badge"], "🔴")
         self.assertEqual(data_100["status"], "critical")
 
+        # Exact boundary tests: 60.0% (WARN_MODERATE) and 80.0% (WARN_HIGH) through cmd_statusline
+        s_60 = make_session(60_000_000)
+        buf_60 = io.StringIO()
+        try:
+            sys.stdout = buf_60
+            cmd_statusline([s_60], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_60 = json.loads(buf_60.getvalue())
+        self.assertEqual(data_60["badge"], "🟡")
+        self.assertEqual(data_60["status"], "warning")
+
+        s_80 = make_session(80_000_000)
+        buf_80 = io.StringIO()
+        try:
+            sys.stdout = buf_80
+            cmd_statusline([s_80], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_80 = json.loads(buf_80.getvalue())
+        self.assertEqual(data_80["badge"], "🟡")
+        self.assertEqual(data_80["status"], "warning")
+
 
 class TestPricingAndCostCalculation(unittest.TestCase):
     def test_argon_intro_vs_standard_pricing(self):
