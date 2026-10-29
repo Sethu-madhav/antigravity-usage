@@ -75,7 +75,9 @@ class TestQuotaCacheFreshness(unittest.TestCase):
         now_utc = datetime.now(timezone.utc)
         self._write_cache(
             cache_path,
-            (now_utc - timedelta(seconds=90)).isoformat(),  # older than the ~60s TTL
+            # Past the max age; a cache between the ~60s TTL and the max age is
+            # shown as a dated reading (see test_quota_cache_stale_display.py).
+            (now_utc - timedelta(seconds=limits._QUOTA_CACHE_MAX_AGE_SECONDS + 90)).isoformat(),
             (now_utc + timedelta(hours=2)).isoformat(),
         )
 
