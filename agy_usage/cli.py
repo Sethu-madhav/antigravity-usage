@@ -6,7 +6,7 @@ import argparse
 import sys
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 
 from agy_usage import __version__
 from agy_usage.aggregator import UsageAggregator
@@ -25,8 +25,11 @@ from agy_usage.display import (
 from agy_usage.exporter import UsageExporter
 from agy_usage.heatmap import TerminalHeatmap
 from agy_usage.limits import (
+    CRIT,
     TIERS,
+    WARN_MODERATE,
     LimitsCalculator,
+    WindowStats,
     get_status_badge,
     parse_token_amount,
     render_gauge_bar,
@@ -1176,47 +1179,38 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     tok_today_str = format_tokens(tok_today)
     cost_today_str = format_cost(cost_today)
 
-    # Health status level & badge
-    argon_active = argon_7d.usage.total_tokens > 0 or argon_7d.pct_used > 0
-    claude_active = claude_7d.usage.total_tokens > 0 or claude_7d.pct_used > 0
-    argon_exceeded = argon_active and argon_7d.is_exceeded
-    claude_exceeded = claude_active and (claude_5h.is_exceeded or claude_7d.is_exceeded)
-    if (
-        rem_5h <= 0
-        or rem_7d <= 0
-        or w_5h.is_exceeded
-        or w_7d.is_exceeded
-        or argon_exceeded
-        or claude_exceeded
-    ):
-        badge = "🔴"
+    # Health status level & badge (BUG-012: aligned with limits via get_status_badge & shared thresholds)
+    badge, _ = get_status_badge(
+        w_5h,
+        w_7d,
+        argon_7d=argon_7d,
+        claude_5h=claude_5h,
+        claude_7d=claude_7d,
+    )
+    if badge == "🔴":
         badge_plain = "[ALERT]"
         level = "critical"
-        color_5h = Colors.red if rem_5h <= 0 else Colors.green
-        color_7d = Colors.red if rem_7d <= 0 else Colors.green
-        color_argon = Colors.red if rem_argon <= 0 else (Colors.yellow if rem_argon < 20 else Colors.green)
         tmux_color = "red"
-    elif (
-        rem_5h < 20
-        or rem_7d < 20
-        or (argon_active and rem_argon < 20)
-        or (claude_active and (rem_claude_5h < 20 or rem_claude_7d < 20))
-    ):
-        badge = "🟡"
+    elif badge == "🟡":
         badge_plain = "[WARN]"
         level = "warning"
-        color_5h = Colors.yellow if rem_5h < 20 else Colors.green
-        color_7d = Colors.yellow if rem_7d < 20 else Colors.green
-        color_argon = Colors.yellow if rem_argon < 20 else Colors.green
         tmux_color = "yellow"
     else:
         badge = "🟢"
         badge_plain = "[OK]"
         level = "healthy"
-        color_5h = Colors.green
-        color_7d = Colors.green
-        color_argon = Colors.green
         tmux_color = "green"
+
+    def _color_for_window(w: WindowStats) -> Callable[[str], str]:
+        if w.is_exceeded or w.pct_used >= CRIT:
+            return Colors.red
+        if w.pct_used >= WARN_MODERATE:
+            return Colors.yellow
+        return Colors.green
+
+    color_5h = _color_for_window(w_5h)
+    color_7d = _color_for_window(w_7d)
+    color_argon = _color_for_window(argon_7d)
 
     # JSON export
     if getattr(args, "json", False):
