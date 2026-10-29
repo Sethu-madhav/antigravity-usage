@@ -58,7 +58,7 @@
 | BUG-015 | 🟡 | B | ⬜ | `parser.py:242-243` | No dedup: session in both CLI+IDE dirs → tokens double-counted |
 | BUG-016 | 🟡 | B | ⬜ | `parser.py:213-217, 246-251` | `getmtime` in sort key crashes whole scan if DB vanishes mid-scan |
 | BUG-017 | 🟡 | B | ⬜ | `parser.py:15-26` | Unbounded varint decode (no 10-byte/64-bit cap) |
-| BUG-018 | 🟡 | B | ⬜ | `limits.py:458-464` + `parser.py:484-486` | mtime fallback drags old steps into 5h window; future-dated step hijacks anchor |
+| BUG-018 | 🟡 | B | 🔧 | `limits.py` (`_compute_cycle_window`) + `parser.py` (step loop) | mtime fallback drags old steps into 5h window; future-dated step hijacks anchor |
 | BUG-019 | 🟡 | B | ⬜ | `cli.py:1287-1300` | `live` + `--json` semantics incoherent (banner becomes one-shot dump) |
 | BUG-020 | 🟡 | B | ⬜ | `exporter.py:117-119` | `UnicodeEncodeError` on non-UTF-8 stdout (Windows cp1252) |
 | BUG-021 | 🟡 | B | ⬜ | `display.py:56-60` | Nested color calls: inner `RESET` wipes outer attribute |
@@ -207,10 +207,18 @@ Same DB in both dirs: tokens summed twice while session counts dedupe by `sessio
 No 10-byte/64-bit cap; corrupt blobs produce astronomically large ints that flow into
 every aggregate unfiltered. **Fix:** abort blob on `shift >= 70`; mask to 64 bits.
 
-**BUG-018 · Timestamp fallbacks skew quota windows · 🟡 B**
+**BUG-018 · Timestamp fallbacks skew quota windows · 🟡 B** 🔧 fix in review
 Steps without timestamps inherit the file's `getmtime` (can pull an old session into the
 current 5h window); a future-dated step re-anchors the cycle in the future → whole window
 renders 0% used. **Fix:** clamp fallback to `[first_ts, now]`; skip steps > now + skew.
+**Fix (in review):** untimestamped steps no longer take the DB mtime; `_fill_missing_step_timestamps`
+(`parser.py`) gives them the nearest preceding timestamped step, else the nearest following one;
+sessions with no step timestamps fall back to the blob start time, then `min(db_mtime, now)`,
+else the step is dropped. `_compute_cycle_window` (`limits.py`) drops items more than
+`_FUTURE_SKEW` (5 min) past `current_time` and clamps items within the skew to `current_time`,
+so a future step can't re-anchor the cycle. Tests: `TestTimestampFallbacks` (4, all fail on the
+old code); `test_unreadable_mtime_skips_untimed_rows` updated to the new semantics (98/98 suite
+pass). Coded by Gemini 3.8 Flash (High), reviewed by Claude Opus 5.5.
 
 **BUG-019 · `live` + `--json` incoherent · 🟡 B**
 `--json live` (root form) runs one-shot JSON export and returns — never reaches

@@ -33,6 +33,9 @@ WARN_MODERATE: float = 60.0
 WARN_HIGH: float = 80.0
 CRIT: float = 100.0
 
+# Clock skew tolerance for cycle window calculations (BUG-018)
+_FUTURE_SKEW: timedelta = timedelta(minutes=5)
+
 
 def classify_model_pool(model_name: str) -> str:
     """Classify a model name into its independent Antigravity quota pool.
@@ -495,6 +498,20 @@ class LimitsCalculator:
         on fixed-duration cycles anchored at the first turn after the previous cycle
         expired: when ``c_start + duration`` passes, the window resets completely to 100%.
         """
+        # BUG-018: Normalize items against current_time to prevent future-dated steps
+        # from corrupting cycle anchoring or inflating windows.
+        # - Items with ts > current_time + _FUTURE_SKEW are dropped entirely.
+        # - Items with current_time < ts <= current_time + _FUTURE_SKEW are clamped to current_time.
+        # Clamping preserves the sorted order.
+        normalized_items: List[Tuple[datetime, TokenUsage, float, str]] = []
+        for ts, u, step_cost, sid in items:
+            if ts > current_time + _FUTURE_SKEW:
+                continue
+            if current_time < ts <= current_time + _FUTURE_SKEW:
+                ts = current_time
+            normalized_items.append((ts, u, step_cost, sid))
+        items = normalized_items
+
         usage = TokenUsage()
         cost = 0.0
         steps_count = 0
