@@ -353,6 +353,10 @@ class AntigravityParser:
                 except Exception:
                     pass
 
+            # Keep the blob start time for partial summaries: a failure in any
+            # later stage must not lose the only timestamp already parsed.
+            first_ts = start_time_blob
+
             # 2. Extract Models and Step-to-Model Mapping from gen_metadata
             enum_to_model: Dict[int, str] = dict(KNOWN_MODEL_ENUMS)
             gm_rows: List[Tuple[int, str, Optional[int]]] = []
@@ -489,22 +493,21 @@ class AntigravityParser:
                 pass
 
             # 4. Extract Step Records and Token Usage
-            first_ts = start_time_blob
             try:
                 cursor.execute(
                     "SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC"
                 )
                 step_rows = cursor.fetchall()
-            except sqlite3.OperationalError:
-                # Locked/vanished mid-read: keep title, workspace and any steps
-                # already collected instead of dropping the whole session.
+            except sqlite3.DatabaseError:
+                # Locked/corrupt/vanished mid-read: keep title, workspace and any
+                # steps already collected instead of dropping the whole session.
                 step_rows = []
 
             try:
                 db_mtime: Optional[datetime] = datetime.fromtimestamp(
                     os.path.getmtime(db_path)
                 )
-            except OSError:
+            except (OSError, OverflowError, ValueError):
                 db_mtime = None
 
             for idx, meta_blob in step_rows:
@@ -584,10 +587,10 @@ class AntigravityParser:
 
             return build_summary()
 
-        except sqlite3.OperationalError:
-            # Transient SQLite failure (e.g. "database is locked"): emit what we
-            # have so the session stays visible, unless the DB was never
-            # validated as a usable session at all.
+        except sqlite3.DatabaseError:
+            # SQLite failure after validation (locked, corrupt page, vanished
+            # file): emit what we have so the session stays visible, unless the
+            # DB was never validated as a usable session at all.
             return build_summary() if validated else None
         except Exception:
             # Unknown failure: preserve the previous skip-the-session behavior.
