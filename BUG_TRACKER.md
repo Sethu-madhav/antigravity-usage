@@ -14,7 +14,7 @@
 
 | Ledger | File | Items | Open | High | Med | Low |
 |--------|------|------:|-----:|-----:|----:|----:|
-| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 25 | 18 | 0 | 8 | 10 |
+| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 26 | 19 | 0 | 8 | 11 |
 | ⚡ Optimizations | [optimizations.md](optimizations.md) | 8 | 8 | 1 | 3 | 4 |
 | 🔧 Improvements | [improvements.md](improvements.md) | 9 | 9 | 0 | 3 | 6 |
 | ✨ Features | [features.md](features.md) | 10 | 10 | n/a | n/a | n/a |
@@ -29,6 +29,11 @@
 > **Settle check 2026-10-29 (coordinator):** master suite 46/46 after PRs #3-#6 (each fix PR
 > carries tests); BUG-004 re-verified at runtime with COLORTERM forced (86 ANSI escapes in
 > plain `heatmap -w 4` output vs 0 under `--no-color`).
+>
+> PR #7 (BUG-008) review verdict: APPROVE WITH NITS, no blockers (DeepSeek V4.1 Flash);
+> nits filed as BUG-026. Merge + settle check pending. Note: PR #7 carries its own
+> BUG_TRACKER.md hunks based on the pre-settle ledger, so integration + tracker resolution
+> is the coordinator's settle step.
 
 ---
 
@@ -61,6 +66,7 @@
 | BUG-023 | 🟠 | B | ⬜ | `setup.py` + `pyproject.toml` + `__init__.py` | Triplicated metadata/entry-point; no LICENSE file |
 | BUG-024 | 🟠 | A | ⬜ | `cli.py:1222` (`cmd_statusline`) | `statusline --csv` accepted but ignored: prints one-line text, exit 0 (found post-merge by Deepseek review of PR #1; cmd_statusline only reads `args.json`) |
 | BUG-025 | 🟡 | A | ⬜ | `heatmap.py:176-198` | Adjacent first-month labels: middle month's label dropped (w0's 2-col span skips w1) — found post-merge by DeepSeek V4.1 Flash review of PR #4 |
+| BUG-026 | 🟡 | B | ⬜ | `parser.py:478-508` | Partial-parse hardening nits from the PR #7 review (parent DBError catch, mtime guard, silent row-skip, missing test cases) |
 
 ### Details
 
@@ -138,6 +144,11 @@ Outer try wraps everything; a transient `database is locked` discards all alread
 steps/title/workspace (despite the "partial summary" comment) → sessions flicker out of
 `live` dashboards. **Fix:** catch `sqlite3.OperationalError` separately; emit partial
 summary in `finally`.
+
+**Review (PR #7):** DeepSeek V4.1 Flash — **APPROVE WITH NITS, no blockers** (2026-10-29).
+Verified: suite 49 on the branch (46 master + 3 new), and the tests pin the bug for real
+(2 of 3 new tests failed on pre-fix master, rerun in a temporary worktree). Hardening
+follow-ups filed as BUG-026.
 
 **BUG-009 · ANSI escapes leak into piped output · 🟠 B**
 `COLORTERM` presence (VS Code shell, Warp, CI) forces colors even when stdout is a file:
@@ -241,11 +252,26 @@ partial-month (mostly-offscreen) label or compact the pair; pin with a regressio
 alongside BUG-006's pinned layout test. Related cleanup candidate: dead
 `month_line_chars` (`heatmap.py:173`).
 
+**BUG-026 · Partial-parse hardening nits from the PR #7 review · 🟡 B** ⬜
+Logged by the DeepSeek V4.1 Flash review of PR #7 (APPROVE WITH NITS, no blockers):
+- `parser.py:498`: only `sqlite3.OperationalError` is caught outside the step guard; a
+  plain `sqlite3.DatabaseError` (corrupt DB) mid-steps-read discards already-parsed
+  title/workspace/first_ts, inconsistent with the keep-what-we-read policy. Catch the
+  parent or document intent.
+- `parser.py:503-508`: `datetime.fromtimestamp` can raise `OverflowError`/`ValueError`,
+  only `OSError` is caught; suggest `except (OSError, OverflowError, ValueError)`.
+- Per-step guard: today unreachable via real corruption and silently swallows programming
+  errors; worth narrowing/logging eventually. Invariant note: `steps.append` precedes
+  `aggregated_usage.add` inside the same try.
+- Test gaps (non-blocking): lock during the title/gen_metadata query (start_time None
+  hole), plain `DatabaseError` mid-steps-read, empty steps table still emits the session,
+  missing-mtime skip path.
+
 ---
 
 ## Suggested order of work
 
-1. **In review:** BUG-008 (PR #7) — Deepseek gate + settle check pending
+1. **Cleared, awaiting merge:** BUG-008 (PR #7, review APPROVE WITH NITS) — coordinator resolves the carried tracker hunks at integration, then settles
 2. **Quick wins batch** (CLI-facing, cheap): BUG-014, BUG-023, BUG-024
 3. **Correctness batch:** BUG-010, BUG-011/012
 4. **Robustness batch:** BUG-016/017/018 + [improvements.md](improvements.md) IMP-006 tests, then the rest by priority
