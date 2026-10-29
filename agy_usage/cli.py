@@ -867,27 +867,43 @@ def cmd_models(sessions: List[SessionSummary]) -> None:
     print(render_table(headers, rows, alignments=["left", "right", "right", "right", "right", "right", "right", "right", "right", "right", "right", "left"], title="MODEL TOKEN USAGE BREAKDOWN"))
 
 
-def cmd_live(args: argparse.Namespace) -> None:
+def cmd_live(args: argparse.Namespace) -> int:
     """Live monitor mode."""
-    interval = max(1, args.interval)
-    print(Colors.cyan(f"Starting Antigravity Usage live monitor (refreshing every {interval}s). Press Ctrl+C to exit."))
+    if getattr(args, "csv", False):
+        print(
+            "agy-usage live: error: --csv is not supported by 'live' (use --json for streaming NDJSON)",
+            file=sys.stderr,
+        )
+        return 2
+
+    interval = max(1, getattr(args, "interval", 3))
+    is_json = getattr(args, "json", False)
+
+    if not is_json:
+        print(Colors.cyan(f"Starting Antigravity Usage live monitor (refreshing every {interval}s). Press Ctrl+C to exit."))
     try:
         while True:
-            # Clear screen
-            sys.stdout.write("\033[2J\033[H")
-            sys.stdout.flush()
-
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"{Colors.bold(Colors.cyan('ANTIGRAVITY LIVE MONITOR'))}  {Colors.dim(f'Last updated: {now_str}')}")
-            print()
-
             sessions = get_sessions(args)
-            cmd_overview(sessions, args)
+            if is_json:
+                sys.stdout.write(UsageExporter.to_json(sessions, indent=None) + "\n")
+                sys.stdout.flush()
+            else:
+                # Clear screen
+                sys.stdout.write("\033[2J\033[H")
+                sys.stdout.flush()
+
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"{Colors.bold(Colors.cyan('ANTIGRAVITY LIVE MONITOR'))}  {Colors.dim(f'Last updated: {now_str}')}")
+                print()
+
+                cmd_overview(sessions, args)
 
             time.sleep(interval)
     except KeyboardInterrupt:
-        print()
-        print(Colors.dim("Live monitor stopped."))
+        if not is_json:
+            print()
+            print(Colors.dim("Live monitor stopped."))
+    return 0
 
 
 def _window_to_dict(w) -> dict:
@@ -1318,8 +1334,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         # display.Colors and heatmap.HeatmapColor (BUG-004 fix).
         Colors.set_override(False)
 
-    sessions = get_sessions(args)
     sub = args.subcommand
+
+    # 'live' refreshes sessions on every tick and manages its own --json/--csv handling
+    if sub == "live":
+        return cmd_live(args)
+
+    sessions = get_sessions(args)
 
     # Subcommands that handle their own formatting and exports
     if sub == "limits":
@@ -1357,8 +1378,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         cmd_monthly(sessions)
     elif sub == "models":
         cmd_models(sessions)
-    elif sub == "live":
-        cmd_live(args)
     else:
         cmd_overview(sessions, args)
 

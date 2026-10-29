@@ -19,7 +19,7 @@ class UsageExporter:
     def to_json(
         sessions: List[SessionSummary],
         include_steps: bool = False,
-        indent: int = 2,
+        indent: Optional[int] = 2,
     ) -> str:
         """Serialize all usage data, rollups, and sessions to JSON."""
         summary = UsageAggregator.compute_summary(sessions)
