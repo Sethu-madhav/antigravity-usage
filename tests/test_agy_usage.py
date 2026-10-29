@@ -289,9 +289,23 @@ class TestLimits(unittest.TestCase):
         self.assertEqual(parse_token_amount("1B"), 1_000_000_000)
         self.assertEqual(parse_token_amount("250k"), 250_000)
         self.assertEqual(parse_token_amount("1.5M"), 1_500_000)
+        self.assertEqual(parse_token_amount("0.5M"), 500_000)
+        self.assertEqual(parse_token_amount(" 100k "), 100_000)
         self.assertIsNone(parse_token_amount(None))
         self.assertIsNone(parse_token_amount(""))
         self.assertIsNone(parse_token_amount("invalid"))
+        # BUG-003: non-finite values must not crash or be accepted
+        self.assertIsNone(parse_token_amount("inf"))
+        self.assertIsNone(parse_token_amount("-inf"))    # exercises OverflowError path
+        self.assertIsNone(parse_token_amount("INF"))
+        self.assertIsNone(parse_token_amount("nan"))
+        self.assertIsNone(parse_token_amount("1e309"))    # float() -> inf
+        self.assertIsNone(parse_token_amount("1e308M"))   # multiplier overflow
+        # BUG-003: negatives and zero are not valid token amounts
+        self.assertIsNone(parse_token_amount("-5M"))
+        self.assertIsNone(parse_token_amount("-1"))
+        self.assertIsNone(parse_token_amount("0"))
+        self.assertIsNone(parse_token_amount("0K"))
 
     def test_render_gauge_bar(self):
         from agy_usage.limits import render_gauge_bar
