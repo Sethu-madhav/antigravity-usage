@@ -14,7 +14,7 @@
 
 | Ledger | File | Items | Open | High | Med | Low |
 |--------|------|------:|-----:|-----:|----:|----:|
-| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 26 | 19 | 0 | 8 | 11 |
+| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 26 | 18 | 0 | 7 | 11 |
 | ⚡ Optimizations | [optimizations.md](optimizations.md) | 8 | 8 | 1 | 3 | 4 |
 | 🔧 Improvements | [improvements.md](improvements.md) | 9 | 9 | 0 | 3 | 6 |
 | ✨ Features | [features.md](features.md) | 10 | 10 | n/a | n/a | n/a |
@@ -53,7 +53,7 @@
 | BUG-010 | 🟠 | B | ⬜ | `parser.py:371-377` | Phantom `gemini-3.8-flash` attribution for unresolvable rows |
 | BUG-011 | 🟠 | B | ⬜ | `cli.py:1035-1054, display.py:107-114` | "Used %" quota colored green (thresholds inverted for `used`) |
 | BUG-012 | 🟠 | B | ⬜ | `limits.py` vs `cli.py:1146-1186` | Health badge thresholds disagree (60/80% vs 80% only) |
-| BUG-013 | 🟠 | B | ⬜ | `limits.py:176-194` | `tokens_remaining` ignores cost/server-fraction quota model |
+| BUG-013 | 🟠 | B | ✅ | `limits.py:176-194` | `tokens_remaining` ignores cost/server-fraction quota model (fixed by PR #12, merge `536926b`) |
 | BUG-014 | 🟡 | A | ⬜ | `cli.py` (`-w` flag) | `-w 500` accepted (help says "up to 52"), renders 500 columns |
 | BUG-015 | 🟡 | B | ⬜ | `parser.py:242-243` | No dedup: session in both CLI+IDE dirs → tokens double-counted |
 | BUG-016 | 🟡 | B | ⬜ | `parser.py:213-217, 246-251` | `getmtime` in sort key crashes whole scan if DB vanishes mid-scan |
@@ -170,10 +170,17 @@ attribute to `"unknown"`.
 used → same state = 🟡 in one command, 🟢 in the other. **Fix:** shared constants
 (`WARN_MODERATE=60, WARN_HIGH=80, CRIT=100`) used by both.
 
-**BUG-013 · `tokens_remaining` ignores cost/server quota · 🟠 B**
+**BUG-013 · `tokens_remaining` ignores cost/server quota · 🟠 B** ✅ fixed by PR #12
 Always `max(0, limit_tokens - total_tokens)` while `pct_used` prefers
 `server_remaining_fraction`/cost → contradictory "100% used / 2.75B remaining". Token
-pct also unclamped (>100%). **Fix:** derive remaining from pct when cost/server model active; clamp.
+pct also unclamped (>100%).
+**Fix (shipped):** `WindowStats.tokens_remaining` returns 0 if `is_exceeded` or
+`limit_tokens <= 0`, and derives from `pct_remaining` when `server_remaining_fraction`
+or cost model is active (`round(limit_tokens * pct_remaining / 100)`), clamped to
+`[0, limit_tokens]`; `pct_used` token branch clamped to `min(100.0, ...)`. Tests:
+server fraction exhausted/partial, cost limit exceeded/partial, token clamping/partial,
+and zero limit (76/76 suite pass). Reviewed by Claude Sonnet 5.5: APPROVE WITH NITS;
+merged as commit `536926b` (2026-10-29).
 
 **BUG-014 · `-w` unclamped · 🟡 A**
 `parse_args(["heatmap", "-w", "500"])` → accepted; help says "up to 52" → 2,000+ char
