@@ -179,7 +179,6 @@ class TerminalHeatmap:
 
         # Build Month Header Line
         # Determine for each week column which month should be displayed
-        month_line_chars: List[str] = [" " * 5]  # align with weekday labels
         prev_month = -1
         month_positions: Dict[int, str] = {}
 
@@ -189,6 +188,12 @@ class TerminalHeatmap:
                 # Place month label
                 month_positions[w] = self.MONTH_NAMES[col_date.month - 1]
                 prev_month = col_date.month
+
+        # BUG-025: a label at column 0 spans columns 0 and 1, so when the window
+        # starts on the last Monday of a month the next month's label (column 1)
+        # would be skipped. Drop the one-week partial month and keep the full one.
+        if 0 in month_positions and 1 in month_positions:
+            del month_positions[0]
 
         # Format month line with exact spacing
         col_idx = 0
