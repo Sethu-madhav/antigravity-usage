@@ -907,7 +907,9 @@ def cmd_live(args: argparse.Namespace) -> int:
 
 
 def _window_to_dict(w) -> dict:
+    unknown = w.is_unknown
     return {
+        "unknown": unknown,
         "start": w.start_time.isoformat(),
         "end": w.end_time.isoformat(),
         "refresh_at": w.refresh_time.isoformat() if w.refresh_time else None,
@@ -919,13 +921,20 @@ def _window_to_dict(w) -> dict:
         "billable_tokens": w.usage.billable_tokens,
         "cache_hit_rate": round(w.usage.cache_hit_rate, 2),
         "limit_tokens": w.limit_tokens,
-        "pct_used": round(w.pct_used, 2),
-        "pct_remaining": round(w.pct_remaining, 2),
-        "tokens_remaining": w.tokens_remaining,
+        "pct_used": None if unknown else round(w.pct_used, 2),
+        "pct_remaining": None if unknown else round(w.pct_remaining, 2),
+        "tokens_remaining": None if unknown else w.tokens_remaining,
         "estimated_cost_usd": round(w.estimated_cost, 4),
         "turns": w.step_count,
         "sessions": w.session_count,
     }
+
+
+def _csv_quota_cells(w) -> list:
+    """Pct remaining, pct used and tokens remaining; empty when the window is unknown."""
+    if w.is_unknown:
+        return ["", "", ""]
+    return [f"{w.pct_remaining:.1f}%", f"{w.pct_used:.1f}%", w.tokens_remaining]
 
 
 def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
@@ -973,6 +982,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
             "tier": tier_cfg.name,
             "checked_at": now_str,
             "live_synced": pools.live_synced,
+            "live_error": pools.live_error,
             "status": badge,
             "pool": "Gemini Models",
             "five_hour_window": _window_to_dict(w_5h),
@@ -993,29 +1003,34 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(["Window", "Total Tokens", "Cached Tokens", "Billable Tokens", "Limit Tokens", "Pct Remaining", "Pct Used", "Tokens Remaining", "Est Cost USD", "Turns", "Sessions"])
-        writer.writerow(["5-Hour Sprint", w_5h.usage.total_tokens, w_5h.usage.cached_tokens, w_5h.usage.billable_tokens, w_5h.limit_tokens, f"{w_5h.pct_remaining:.1f}%", f"{w_5h.pct_used:.1f}%", w_5h.tokens_remaining, f"{w_5h.estimated_cost:.4f}", w_5h.step_count, w_5h.session_count])
-        writer.writerow(["Weekly Cap", w_7d.usage.total_tokens, w_7d.usage.cached_tokens, w_7d.usage.billable_tokens, w_7d.limit_tokens, f"{w_7d.pct_remaining:.1f}%", f"{w_7d.pct_used:.1f}%", w_7d.tokens_remaining, f"{w_7d.estimated_cost:.4f}", w_7d.step_count, w_7d.session_count])
-        writer.writerow(["Argon Weekly Cap", argon_7d.usage.total_tokens, argon_7d.usage.cached_tokens, argon_7d.usage.billable_tokens, argon_7d.limit_tokens, f"{argon_7d.pct_remaining:.1f}%", f"{argon_7d.pct_used:.1f}%", argon_7d.tokens_remaining, f"{argon_7d.estimated_cost:.4f}", argon_7d.step_count, argon_7d.session_count])
-        writer.writerow(["Claude & GPT 5-Hour", claude_5h.usage.total_tokens, claude_5h.usage.cached_tokens, claude_5h.usage.billable_tokens, claude_5h.limit_tokens, f"{claude_5h.pct_remaining:.1f}%", f"{claude_5h.pct_used:.1f}%", claude_5h.tokens_remaining, f"{claude_5h.estimated_cost:.4f}", claude_5h.step_count, claude_5h.session_count])
-        writer.writerow(["Claude & GPT Weekly Cap", claude_7d.usage.total_tokens, claude_7d.usage.cached_tokens, claude_7d.usage.billable_tokens, claude_7d.limit_tokens, f"{claude_7d.pct_remaining:.1f}%", f"{claude_7d.pct_used:.1f}%", claude_7d.tokens_remaining, f"{claude_7d.estimated_cost:.4f}", claude_7d.step_count, claude_7d.session_count])
+        writer.writerow(["5-Hour Sprint", w_5h.usage.total_tokens, w_5h.usage.cached_tokens, w_5h.usage.billable_tokens, w_5h.limit_tokens, *_csv_quota_cells(w_5h), f"{w_5h.estimated_cost:.4f}", w_5h.step_count, w_5h.session_count])
+        writer.writerow(["Weekly Cap", w_7d.usage.total_tokens, w_7d.usage.cached_tokens, w_7d.usage.billable_tokens, w_7d.limit_tokens, *_csv_quota_cells(w_7d), f"{w_7d.estimated_cost:.4f}", w_7d.step_count, w_7d.session_count])
+        writer.writerow(["Argon Weekly Cap", argon_7d.usage.total_tokens, argon_7d.usage.cached_tokens, argon_7d.usage.billable_tokens, argon_7d.limit_tokens, *_csv_quota_cells(argon_7d), f"{argon_7d.estimated_cost:.4f}", argon_7d.step_count, argon_7d.session_count])
+        writer.writerow(["Claude & GPT 5-Hour", claude_5h.usage.total_tokens, claude_5h.usage.cached_tokens, claude_5h.usage.billable_tokens, claude_5h.limit_tokens, *_csv_quota_cells(claude_5h), f"{claude_5h.estimated_cost:.4f}", claude_5h.step_count, claude_5h.session_count])
+        writer.writerow(["Claude & GPT Weekly Cap", claude_7d.usage.total_tokens, claude_7d.usage.cached_tokens, claude_7d.usage.billable_tokens, claude_7d.limit_tokens, *_csv_quota_cells(claude_7d), f"{claude_7d.estimated_cost:.4f}", claude_7d.step_count, claude_7d.session_count])
         print(buf.getvalue().strip())
         return
 
-    sync_tag = (
-        Colors.green("Live Antigravity Server + Local DB")
-        if pools.live_synced
-        else Colors.dim("Local DB Cost-Proportional Model")
-    )
+    if pools.live_synced:
+        sync_tag = Colors.green("Live Antigravity Server + Local DB")
+    elif pools.live_error is not None:
+        sync_tag = Colors.yellow("Local estimate, this device only (Antigravity server not reachable)")
+    else:
+        sync_tag = Colors.dim("Local DB Cost-Proportional Model")
     print()
     print(Colors.bold(Colors.cyan("── ANTIGRAVITY QUOTA & RATE LIMITS MONITOR " + "─" * 38)))
     print(f"  {Colors.bold('Model Groups:')}   Gemini Models  |  Claude and GPT models  |  Gemini 4 Argon")
     print(f"  {Colors.bold('Subscription:')}   {tier_cfg.display_name} ({tier_cfg.description})")
     print(f"  {Colors.bold('Quota Source:')}   {sync_tag}")
+    if pools.live_error is not None:
+        print(f"    {Colors.dim('↳')} {Colors.dim(pools.live_error)}")
     print(f"  {Colors.bold('Checked At:')}     {now_str}")
     print(f"  {Colors.bold('System Status:')}  {badge} {status_msg}")
     print()
 
     def _countdown(w) -> str:
+        if w.is_unknown:
+            return "unknown"
         if w.refresh_time and (w.usage.total_tokens > 0 or w.pct_used > 0):
             secs = (w.refresh_time - now_dt).total_seconds()
             if secs > 0:
@@ -1034,28 +1049,39 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
             return Colors.yellow
         return Colors.red
 
+    def _rem_text(w) -> str:
+        if w.is_unknown:
+            return Colors.dim("?")
+        return Colors.bold(_rem_color(w.pct_remaining)(f"{round(w.pct_remaining)}%"))
+
+    def _remaining_cells(w) -> str:
+        if w.is_unknown:
+            return f"{Colors.dim('[' + '░' * 24 + ']')} {Colors.bold('?')} (unknown)"
+        bar = render_remaining_bar(w.pct_remaining, width=24)
+        return f"{bar} {Colors.bold(f'{round(w.pct_remaining)}%')} ({format_percent(w.pct_remaining)} exact | {format_percent(w.pct_used, high_is_good=False)} used)"
+
     # 1. KPI Summary Cards (Matching Official Antigravity Models & Usage Groups)
     card1 = (
         "5-HOUR REMAINING",
-        Colors.bold(_rem_color(w_5h.pct_remaining)(f"{round(w_5h.pct_remaining)}%")),
+        _rem_text(w_5h),
         f"Gemini 5h ({w5_countdown})",
     )
     card2 = (
         "WEEKLY REMAINING",
-        Colors.bold(_rem_color(w_7d.pct_remaining)(f"{round(w_7d.pct_remaining)}%")),
+        _rem_text(w_7d),
         f"Gemini Wk ({w7_countdown})",
     )
     claude_min_rem = min(claude_5h.pct_remaining, claude_7d.pct_remaining)
     card3 = (
         "CLAUDE & GPT QUOTA",
-        f"5h: {Colors.bold(_rem_color(claude_5h.pct_remaining)(f'{round(claude_5h.pct_remaining)}%'))} | Wk: {Colors.bold(_rem_color(claude_7d.pct_remaining)(f'{round(claude_7d.pct_remaining)}%'))}"
+        f"5h: {_rem_text(claude_5h)} | Wk: {_rem_text(claude_7d)}"
         if tier_cfg.claude_weekly_limit > 0
         else Colors.dim("N/A"),
         f"5h resets {c5_countdown}" if claude_5h.is_exceeded else f"5h: {c5_countdown} ({format_cost(claude_7d.estimated_cost)})",
     )
     card4 = (
         "GEMINI 4 ARGON",
-        Colors.bold(_rem_color(argon_7d.pct_remaining)(f"{round(argon_7d.pct_remaining)}%"))
+        _rem_text(argon_7d)
         if argon_7d.limit_tokens > 0
         else Colors.dim("N/A"),
         f"{format_tokens(argon_7d.usage.total_tokens)} used ({argon_countdown})"
@@ -1066,6 +1092,10 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
     print()
 
     def _format_refresh_status(w, window_type: str = "weekly", peer_5h=None) -> str:
+        if w.is_unknown:
+            return Colors.yellow(
+                f"Unknown. The Antigravity server is not reachable, and this device has no usage in the current {window_type} cycle."
+            )
         if peer_5h is not None and peer_5h.is_exceeded and peer_5h.refresh_time:
             secs_5h = max(0.0, (peer_5h.refresh_time - now_dt).total_seconds())
             return Colors.red(
@@ -1089,11 +1119,9 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
 
     # 2. Group 1: Gemini Models (Weekly + 5-Hour, matching UI order)
     print(Colors.bold(Colors.cyan("── GEMINI MODELS (Gemini Flash & Gemini Pro) " + "─" * 36)))
-    bar_7d = render_remaining_bar(w_7d.pct_remaining, width=24)
-    bar_5h = render_remaining_bar(w_5h.pct_remaining, width=24)
-    print(f"  {Colors.bold('Weekly Limit Remaining:')}     {bar_7d} {Colors.bold(f'{round(w_7d.pct_remaining)}%')} ({format_percent(w_7d.pct_remaining)} exact | {format_percent(w_7d.pct_used, high_is_good=False)} used)")
+    print(f"  {Colors.bold('Weekly Limit Remaining:')}     {_remaining_cells(w_7d)}")
     print(f"    {Colors.dim('↳')} {_format_refresh_status(w_7d, 'weekly', peer_5h=w_5h)}")
-    print(f"  {Colors.bold('Five Hour Limit Remaining:')}  {bar_5h} {Colors.bold(f'{round(w_5h.pct_remaining)}%')} ({format_percent(w_5h.pct_remaining)} exact | {format_percent(w_5h.pct_used, high_is_good=False)} used)")
+    print(f"  {Colors.bold('Five Hour Limit Remaining:')}  {_remaining_cells(w_5h)}")
     print(f"    {Colors.dim('↳')} {_format_refresh_status(w_5h, '5-hour')}")
     print(f"  {Colors.bold('Weekly Tokens Consumed:')}     {format_tokens(w_7d.usage.total_tokens)} total ({format_tokens(w_7d.usage.billable_tokens)} billable, {format_tokens(w_7d.usage.cached_tokens)} cached @ {format_percent(w_7d.usage.cache_hit_rate)} hit rate)")
     print(f"  {Colors.bold('Activity Volume:')}            {w_7d.step_count} turns across {w_7d.session_count} session(s) this week ({format_cost(w_7d.estimated_cost)}) | 5h: {w_5h.step_count} turns ({format_cost(w_5h.estimated_cost)})")
@@ -1104,11 +1132,9 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
     if tier_cfg.claude_weekly_limit <= 0 and tier_cfg.name == "free":
         print(f"  {Colors.bold('Availability:')}               {Colors.yellow('Claude and GPT partner models require Google AI Pro or Ultra.')}")
     else:
-        bar_c7 = render_remaining_bar(claude_7d.pct_remaining, width=24)
-        bar_c5 = render_remaining_bar(claude_5h.pct_remaining, width=24)
-        print(f"  {Colors.bold('Weekly Limit Remaining:')}     {bar_c7} {Colors.bold(f'{round(claude_7d.pct_remaining)}%')} ({format_percent(claude_7d.pct_remaining)} exact | {format_percent(claude_7d.pct_used, high_is_good=False)} used)")
+        print(f"  {Colors.bold('Weekly Limit Remaining:')}     {_remaining_cells(claude_7d)}")
         print(f"    {Colors.dim('↳')} {_format_refresh_status(claude_7d, 'weekly', peer_5h=claude_5h)}")
-        print(f"  {Colors.bold('Five Hour Limit Remaining:')}  {bar_c5} {Colors.bold(f'{round(claude_5h.pct_remaining)}%')} ({format_percent(claude_5h.pct_remaining)} exact | {format_percent(claude_5h.pct_used, high_is_good=False)} used)")
+        print(f"  {Colors.bold('Five Hour Limit Remaining:')}  {_remaining_cells(claude_5h)}")
         print(f"    {Colors.dim('↳')} {_format_refresh_status(claude_5h, '5-hour')}")
         print(f"  {Colors.bold('Weekly Tokens Consumed:')}     {format_tokens(claude_7d.usage.total_tokens)} total ({format_tokens(claude_7d.usage.billable_tokens)} billable, {format_tokens(claude_7d.usage.cached_tokens)} cached @ {format_percent(claude_7d.usage.cache_hit_rate)} hit rate)")
         print(f"  {Colors.bold('Activity Volume:')}            {claude_7d.step_count} turns across {claude_7d.session_count} session(s) this week ({format_cost(claude_7d.estimated_cost)}) | 5h: {claude_5h.step_count} turns ({format_cost(claude_5h.estimated_cost)})")
@@ -1119,10 +1145,10 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
     if argon_7d.limit_tokens <= 0 and tier_cfg.name == "free":
         print(f"  {Colors.bold('Availability:')}               {Colors.yellow('Gemini 4 Argon is not available on the Free tier (requires Google AI Pro or Ultra).')}")
     else:
-        bar_argon = render_remaining_bar(argon_7d.pct_remaining, width=24)
-        print(f"  {Colors.bold('Gemini 4 Argon Weekly Limit:')} {bar_argon} {Colors.bold(f'{round(argon_7d.pct_remaining)}%')} ({format_percent(argon_7d.pct_remaining)} exact | {format_percent(argon_7d.pct_used, high_is_good=False)} used)")
+        print(f"  {Colors.bold('Gemini 4 Argon Weekly Limit:')} {_remaining_cells(argon_7d)}")
         print(f"    {Colors.dim('↳')} {_format_refresh_status(argon_7d, 'weekly')}")
-        print(f"  {Colors.bold('Weekly Quota Balance:')}       {format_tokens(argon_7d.tokens_remaining)} remaining of ~{format_tokens(argon_7d.limit_tokens)} effective weekly allowance ({format_cost(argon_7d.estimated_cost)} / {format_cost(tier_cfg.argon_weekly_cost_usd)} cost cap)")
+        argon_left = "unknown" if argon_7d.is_unknown else format_tokens(argon_7d.tokens_remaining)
+        print(f"  {Colors.bold('Weekly Quota Balance:')}       {argon_left} remaining of ~{format_tokens(argon_7d.limit_tokens)} effective weekly allowance ({format_cost(argon_7d.estimated_cost)} / {format_cost(tier_cfg.argon_weekly_cost_usd)} cost cap)")
         print(f"  {Colors.bold('Weekly Tokens Consumed:')}     {format_tokens(argon_7d.usage.total_tokens)} total ({format_tokens(argon_7d.usage.billable_tokens)} billable, {format_tokens(argon_7d.usage.cached_tokens)} cached @ {format_percent(argon_7d.usage.cache_hit_rate)} hit rate)")
         print(f"  {Colors.bold('Activity Volume:')}            {argon_7d.step_count} turns across {argon_7d.session_count} session(s) ({format_cost(argon_7d.estimated_cost)})")
     print()
@@ -1175,17 +1201,20 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     tier_cfg = pools.tier
 
     s5 = (w_5h.refresh_time - now).total_seconds() if (w_5h.refresh_time and (w_5h.usage.total_tokens > 0 or w_5h.pct_used > 0)) else 0
-    rec_5h = f"in {format_duration(s5)}" if s5 > 0 else "Ready"
+    rec_5h = "unknown" if w_5h.is_unknown else (f"in {format_duration(s5)}" if s5 > 0 else "Ready")
 
     s7 = (w_7d.refresh_time - now).total_seconds() if (w_7d.refresh_time and (w_7d.usage.total_tokens > 0 or w_7d.pct_used > 0)) else 0
-    rec_7d = f"in {format_duration(s7)}" if s7 > 0 else "Ready"
+    rec_7d = "unknown" if w_7d.is_unknown else (f"in {format_duration(s7)}" if s7 > 0 else "Ready")
 
     s_argon = (argon_7d.refresh_time - now).total_seconds() if (argon_7d.refresh_time and (argon_7d.usage.total_tokens > 0 or argon_7d.pct_used > 0)) else 0
-    rec_argon = f"in {format_duration(s_argon)}" if s_argon > 0 else "Ready"
+    rec_argon = "unknown" if argon_7d.is_unknown else (f"in {format_duration(s_argon)}" if s_argon > 0 else "Ready")
 
-    rem_5h = round(w_5h.pct_remaining)
-    rem_7d = round(w_7d.pct_remaining)
-    rem_argon = round(argon_7d.pct_remaining)
+    pct_5h = None if w_5h.is_unknown else round(w_5h.pct_remaining)
+    pct_7d = None if w_7d.is_unknown else round(w_7d.pct_remaining)
+    pct_argon = None if argon_7d.is_unknown else round(argon_7d.pct_remaining)
+    rem_5h = "?" if pct_5h is None else f"{pct_5h}%"
+    rem_7d = "?" if pct_7d is None else f"{pct_7d}%"
+    rem_argon = "?" if pct_argon is None else f"{pct_argon}%"
     rem_claude_5h = round(claude_5h.pct_remaining)
     rem_claude_7d = round(claude_7d.pct_remaining)
 
@@ -1218,6 +1247,10 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         badge_plain = "[WARN]"
         level = "warning"
         tmux_color = "yellow"
+    elif badge == "⚪":
+        badge_plain = "[UNKNOWN]"
+        level = "unknown"
+        tmux_color = "colour244"
     else:
         badge = "🟢"
         badge_plain = "[OK]"
@@ -1225,6 +1258,8 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         tmux_color = "green"
 
     def _color_for_window(w: WindowStats) -> Callable[[str], str]:
+        if w.is_unknown:
+            return Colors.dim
         if w.is_exceeded or w.pct_used >= CRIT:
             return Colors.red
         if w.pct_used >= WARN_MODERATE:
@@ -1242,15 +1277,15 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             "status": level,
             "badge": badge,
             "tier": tier_cfg.name,
-            "five_hour_pct": rem_5h,
+            "five_hour_pct": pct_5h,
             "five_hour_refresh": rec_5h,
             "five_hour_used_tokens": w_5h.usage.total_tokens,
             "five_hour_limit_tokens": w_5h.limit_tokens,
-            "weekly_pct": rem_7d,
+            "weekly_pct": pct_7d,
             "weekly_refresh": rec_7d,
             "weekly_used_tokens": w_7d.usage.total_tokens,
             "weekly_limit_tokens": w_7d.limit_tokens,
-            "argon_weekly_pct": rem_argon,
+            "argon_weekly_pct": pct_argon,
             "argon_weekly_refresh": rec_argon,
             "argon_weekly_used_tokens": argon_7d.usage.total_tokens,
             "argon_weekly_limit_tokens": argon_7d.limit_tokens,
@@ -1294,15 +1329,15 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             level,
             badge,
             tier_cfg.name,
-            rem_5h,
+            pct_5h,
             rec_5h,
             w_5h.usage.total_tokens,
             w_5h.limit_tokens,
-            rem_7d,
+            pct_7d,
             rec_7d,
             w_7d.usage.total_tokens,
             w_7d.limit_tokens,
-            rem_argon,
+            pct_argon,
             rec_argon,
             argon_7d.usage.total_tokens,
             argon_7d.limit_tokens,
@@ -1321,11 +1356,11 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         replacements = {
             "{status}": badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge,
             "{badge}": badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge,
-            "{5h_pct}": f"{rem_5h}",
+            "{5h_pct}": rem_5h.rstrip("%"),
             "{5h_refresh}": rec_5h,
-            "{wk_pct}": f"{rem_7d}",
+            "{wk_pct}": rem_7d.rstrip("%"),
             "{wk_refresh}": rec_7d,
-            "{argon_pct}": f"{rem_argon}",
+            "{argon_pct}": rem_argon.rstrip("%"),
             "{argon_refresh}": rec_argon,
             "{today_tokens}": tok_today_str,
             "{today_cost}": cost_today_str,
@@ -1340,10 +1375,10 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
 
     # Tmux mode
     if getattr(args, "tmux", False):
-        argon_seg = f"#[fg=colour238]| #[fg=white]Ar: {rem_argon}% #[fg=colour244]({rec_argon}) " if has_argon else ""
+        argon_seg = f"#[fg=colour238]| #[fg=white]Ar: {rem_argon} #[fg=colour244]({rec_argon}) " if has_argon else ""
         print(
-            f"#[fg={tmux_color}]● #[fg=white]5h: {rem_5h}% #[fg=colour244]({rec_5h}) "
-            f"#[fg=colour238]| #[fg=white]Wk: {rem_7d}% #[fg=colour244]({rec_7d}) "
+            f"#[fg={tmux_color}]● #[fg=white]5h: {rem_5h} #[fg=colour244]({rec_5h}) "
+            f"#[fg=colour238]| #[fg=white]Wk: {rem_7d} #[fg=colour244]({rec_7d}) "
             f"{argon_seg}"
             f"#[fg=colour238]| #[fg=white]Today: {tok_today_str} #[fg=green]({cost_today_str})"
         )
@@ -1353,22 +1388,22 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     is_plain = getattr(args, "plain", False) or not Colors.enabled() or getattr(args, "no_color", False)
     if is_plain:
         if getattr(args, "short", False):
-            argon_short = f" Ar:{rem_argon}%" if has_argon else ""
-            print(f"{badge_plain} 5h:{rem_5h}% Wk:{rem_7d}%{argon_short} {cost_today_str}")
+            argon_short = f" Ar:{rem_argon}" if has_argon else ""
+            print(f"{badge_plain} 5h:{rem_5h} Wk:{rem_7d}{argon_short} {cost_today_str}")
         else:
-            argon_part = f" | Ar: {rem_argon}% ({rec_argon})" if has_argon else ""
-            print(f"{badge_plain} 5h: {rem_5h}% ({rec_5h}) | Wk: {rem_7d}% ({rec_7d}){argon_part} | Today: {tok_today_str} ({cost_today_str})")
+            argon_part = f" | Ar: {rem_argon} ({rec_argon})" if has_argon else ""
+            print(f"{badge_plain} 5h: {rem_5h} ({rec_5h}) | Wk: {rem_7d} ({rec_7d}){argon_part} | Today: {tok_today_str} ({cost_today_str})")
         return
 
     # Default ANSI Colored mode
     if getattr(args, "short", False):
-        argon_short = f" {color_argon(f'Ar:{rem_argon}%')}" if has_argon else ""
-        print(f"{badge} {color_5h(f'5h:{rem_5h}%')} {color_7d(f'Wk:{rem_7d}%')}{argon_short} {Colors.green(cost_today_str)}")
+        argon_short = f" {color_argon(f'Ar:{rem_argon}')}" if has_argon else ""
+        print(f"{badge} {color_5h(f'5h:{rem_5h}')} {color_7d(f'Wk:{rem_7d}')}{argon_short} {Colors.green(cost_today_str)}")
     else:
-        argon_part = f"{color_argon('Ar:')} {color_argon(f'{rem_argon}%')} {Colors.dim(f'({rec_argon})')} | " if has_argon else ""
+        argon_part = f"{color_argon('Ar:')} {color_argon(f'{rem_argon}')} {Colors.dim(f'({rec_argon})')} | " if has_argon else ""
         print(
-            f"{badge} {color_5h('5h:')} {color_5h(f'{rem_5h}%')} {Colors.dim(f'({rec_5h})')} | "
-            f"{color_7d('Wk:')} {color_7d(f'{rem_7d}%')} {Colors.dim(f'({rec_7d})')} | "
+            f"{badge} {color_5h('5h:')} {color_5h(f'{rem_5h}')} {Colors.dim(f'({rec_5h})')} | "
+            f"{color_7d('Wk:')} {color_7d(f'{rem_7d}')} {Colors.dim(f'({rec_7d})')} | "
             f"{argon_part}"
             f"Today: {tok_today_str} {Colors.green(f'({cost_today_str})')}"
         )
