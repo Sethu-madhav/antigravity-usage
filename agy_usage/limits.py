@@ -268,9 +268,34 @@ def _parse_utc_iso_to_local_naive(iso_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _parse_fetched_at(iso_str: Optional[str]) -> Optional[datetime]:
+    """Parse a quota cache ``fetched_at`` stamp into an aware UTC datetime.
+
+    Naive stamps are treated as UTC. Returns None for missing or unparseable
+    stamps so the caller rejects the cache (BUG-005).
+    """
+    if not iso_str:
+        return None
+    try:
+        s = iso_str.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt_utc = datetime.fromisoformat(s)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if dt_utc.tzinfo is None:
+        return dt_utc.replace(tzinfo=timezone.utc)
+    return dt_utc.astimezone(timezone.utc)
+
+
 _QUOTA_CACHE_PATH = os.path.expanduser(
     "~/.gemini/antigravity/agy_usage_quota_cache.json"
 )
+
+# BUG-005: the on-disk quota cache is a fallback, not a live feed — treat it as
+# valid for at most this long after it was fetched, and never rotate hours-old
+# remainingFractions in place of a live server response.
+_QUOTA_CACHE_TTL_SECONDS = 60.0
 
 
 def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]:
@@ -278,7 +303,8 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
 
     Calls ``RetrieveUserQuotaSummary`` and ``GetUserStatus`` on the localhost port
     of the running Antigravity ``language_server`` process (if active), falling back
-    to the last cached response on disk when valid.
+    to the last cached response on disk only while it is fresh (BUG-005: a cache
+    older than ~60s is rejected so it is never rendered as live server data).
     """
     try:
         ps_out = subprocess.check_output(
@@ -387,7 +413,13 @@ def fetch_live_quota_summary(use_cache: bool = True) -> Optional[Dict[str, Any]]
             with open(_QUOTA_CACHE_PATH, "r", encoding="utf-8") as fp:
                 cached = json.load(fp)
             if isinstance(cached, dict) and "buckets" in cached:
-                return cached
+                fetched_at = _parse_fetched_at(cached.get("fetched_at"))
+                if (
+                    fetched_at is not None
+                    and datetime.now(timezone.utc) - fetched_at
+                    <= timedelta(seconds=_QUOTA_CACHE_TTL_SECONDS)
+                ):
+                    return cached
         except Exception:
             pass
     return None
@@ -605,6 +637,9 @@ class LimitsCalculator:
             reset_dt = _parse_utc_iso_to_local_naive(bucket.get("resetTime"))
             rem_frac = float(bucket.get("remainingFraction", 0.0))
             desc = bucket.get("description") or None
+            # BUG-005: a bucket whose resetTime is not in the future describes an
+            # expired cycle — its remainingFraction must not be grafted onto the
+            # freshly computed window, so leave it at its locally computed state.
             if reset_dt is not None and reset_dt > current_time:
                 w = LimitsCalculator._compute_cycle_window(
                     items,
@@ -618,9 +653,6 @@ class LimitsCalculator:
                     server_remaining_fraction=rem_frac,
                     server_description=desc,
                 )
-            else:
-                w.server_remaining_fraction = rem_frac
-                w.server_description = desc
 
         # Keep limit_tokens consistent with pct_used when cost/server fraction drives quota
         if not has_custom_token_limit and w.usage.total_tokens > 0:
