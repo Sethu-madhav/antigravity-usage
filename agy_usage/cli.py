@@ -363,7 +363,10 @@ Examples:
         help="Custom template format string (e.g. '{status} 5h:{5h_pct}%% | Wk:{wk_pct}%% | {today_cost}')",
     )
 
-    return parser.parse_args(args)
+    parsed = parser.parse_args(args)
+    if hasattr(parsed, "weeks") and parsed.weeks is not None:
+        parsed.weeks = max(4, min(52, parsed.weeks))
+    return parsed
 
 
 def get_sessions(args: argparse.Namespace) -> List[SessionSummary]:
@@ -507,6 +510,10 @@ def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> Non
     )
 
     print()
+    if heatmap.is_terminal_narrow:
+        print(Colors.yellow(
+            f"Warning: Terminal width ({heatmap.term_cols}) is narrower than heatmap ({heatmap.required_cols} columns); output may wrap."
+        ))
     print(Colors.bold(Colors.cyan(f"── GITHUB-STYLE CONTRIBUTION HEATMAP ({args.metric.upper()} TOKENS) " + "─" * 25)))
     print(heatmap.render())
     print()
