@@ -4,7 +4,7 @@ import io
 import os
 import unittest
 from contextlib import redirect_stdout
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest import mock
 
 from agy_usage import display as display_mod
@@ -160,6 +160,58 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         self.assertIn("Fri", rendered)
         self.assertIn("Less", rendered)
         self.assertIn("More", rendered)
+
+    def test_month_labels_align_to_week_columns(self):
+        """BUG-006: month labels start exactly at their week column and advance
+        enough columns for their width, so they never drift right or overlap."""
+        Colors.set_override(False)
+        self.addCleanup(Colors.set_override, None)
+
+        daily = {date(2026, 9, 1): DailyUsage(date=date(2026, 9, 1), usage=TokenUsage(prompt_tokens=1000))}
+        weeks = 52
+        hm = TerminalHeatmap(daily, metric="total", weeks=weeks, end_date=date(2026, 10, 28))
+        # Colors are disabled, so line 0 of the render is the plain month header.
+        header = hm.render().splitlines()[0]
+        self.assertNotIn("\033", header)
+
+        # Independently derive which week column each month label is placed on.
+        end_sunday = date(2026, 10, 28) + timedelta(days=6 - date(2026, 10, 28).weekday())
+        start_monday = end_sunday - timedelta(days=weeks * 7 - 1)
+        placed = []  # (week_column, month_name)
+        prev_month = -1
+        for w in range(weeks):
+            col_date = start_monday + timedelta(days=7 * w)
+            if col_date.month != prev_month:
+                placed.append((w, TerminalHeatmap.MONTH_NAMES[col_date.month - 1]))
+                prev_month = col_date.month
+
+        # Multi-month window with non-uniform month boundaries (Monday of a week
+        # still in the previous month) so any drift would show up.
+        self.assertGreater(len(placed), 10)
+
+        # Every label starts exactly at char offset 5 + 2*w of its own column.
+        for w, name in placed:
+            self.assertEqual(header[5 + 2 * w:5 + 2 * w + len(name)], name)
+
+        # Over consecutive labels, each previous label clears exactly its own
+        # ceil(len/2) columns and nothing more: no cumulative drift.
+        for (w1, n1), (w2, _n2) in zip(placed, placed[1:]):
+            cols_skip = max(1, -(-len(n1) // 2))
+            segment = header[5 + 2 * w1:5 + 2 * w2]
+            self.assertEqual(segment, n1.ljust(cols_skip * 2) + " " * 2 * (w2 - w1 - cols_skip))
+
+    def test_month_labels_pinned_window_layout(self):
+        """BUG-006: exact header for a pinned window (labels on weeks 0/2/6)."""
+        Colors.set_override(False)
+        self.addCleanup(Colors.set_override, None)
+
+        daily = {date(2026, 9, 1): DailyUsage(date=date(2026, 9, 1), usage=TokenUsage(prompt_tokens=1000))}
+        hm = TerminalHeatmap(daily, metric="total", weeks=10, end_date=date(2026, 10, 28))
+        header = hm.render().splitlines()[0]
+
+        # 5-space indent, then week columns of 2 chars: "Aug" on col 0, "Sep" on
+        # col 2, "Oct" on col 6; each label owns ceil(len/2) columns, the rest blank.
+        self.assertEqual(header, "     Aug Sep     Oct")
 
     def test_no_color_kill_switch_disables_heatmap_escapes(self):
         """BUG-004: the shared --no-color switch must strip every ANSI escape, not just Colors."""
