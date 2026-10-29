@@ -8,6 +8,7 @@ import sys
 from datetime import date, timedelta
 from typing import Callable, Dict, List, Optional, Tuple
 
+from agy_usage.display import Colors
 from agy_usage.models import DailyUsage, TokenUsage
 
 
@@ -39,10 +40,15 @@ class HeatmapColor:
 
     @classmethod
     def supports_color(cls) -> bool:
-        """Check if current terminal supports ANSI colors."""
-        if os.environ.get("NO_COLOR"):
-            return False
-        return sys.stdout.isatty() or os.environ.get("COLORTERM") is not None
+        """Check if ANSI colors are enabled (honors the global --no-color override, BUG-004)."""
+        return Colors.enabled()
+
+    @classmethod
+    def wrap(cls, text: str, code: str) -> str:
+        """Style text with an ANSI code, or return it plain when colors are disabled."""
+        if not cls.supports_color():
+            return text
+        return f"{code}{text}{cls.RESET}"
 
     @classmethod
     def supports_truecolor(cls) -> bool:
@@ -55,8 +61,9 @@ class HeatmapColor:
     def cell(cls, level: int, char: str = "■") -> str:
         """Render a single colored cell."""
         if not cls.supports_color():
+            level = max(0, min(4, level))
             symbols = ["·", "░", "▒", "▓", "█"]
-            return symbols[min(level, 4)]
+            return symbols[level]
 
         level = max(0, min(4, level))
         if cls.supports_truecolor():
@@ -188,12 +195,12 @@ class TerminalHeatmap:
                 month_header_str += "  "
                 col_idx += 1
 
-        lines = [HeatmapColor.DIM + month_header_str.rstrip() + HeatmapColor.RESET]
+        lines = [HeatmapColor.wrap(month_header_str.rstrip(), HeatmapColor.DIM)]
 
         # Build Weekday Rows
         for day_idx in range(7):
             label = self.WEEKDAY_LABELS[day_idx]
-            row_str = f"{HeatmapColor.DIM}{label}{HeatmapColor.RESET} "
+            row_str = HeatmapColor.wrap(label, HeatmapColor.DIM) + " "
             for w in range(self.num_weeks):
                 curr_date, val, _ = matrix[day_idx][w]
                 if curr_date > self.end_date:
@@ -209,13 +216,13 @@ class TerminalHeatmap:
         legend_cells = "".join(
             HeatmapColor.cell(lvl, "■") + " " for lvl in range(5)
         )
-        legend_str = f"{HeatmapColor.DIM}Less {HeatmapColor.RESET}{legend_cells}{HeatmapColor.DIM}More{HeatmapColor.RESET}"
+        legend_str = f"{HeatmapColor.wrap('Less ', HeatmapColor.DIM)}{legend_cells}{HeatmapColor.wrap('More', HeatmapColor.DIM)}"
 
         # Metric label
         metric_title = self.metric.capitalize() + " Tokens"
         summary_info = (
-            f"{HeatmapColor.BOLD}{total_period_val:,}{HeatmapColor.RESET} {metric_title} "
-            f"across {HeatmapColor.CYAN}{active_days_count}{HeatmapColor.RESET} active days "
+            f"{HeatmapColor.wrap(f'{total_period_val:,}', HeatmapColor.BOLD)} {metric_title} "
+            f"across {HeatmapColor.wrap(str(active_days_count), HeatmapColor.CYAN)} active days "
             f"in last {self.num_weeks} weeks"
         )
 

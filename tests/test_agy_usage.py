@@ -1,10 +1,17 @@
 """Unit tests for Antigravity Model Usage Tracker."""
 
+import io
+import os
 import unittest
+from contextlib import redirect_stdout
 from datetime import date, datetime
+from unittest import mock
 
+from agy_usage import display as display_mod
 from agy_usage.aggregator import UsageAggregator
+from agy_usage.cli import main as cli_main
 from agy_usage.display import (
+    Colors,
     format_duration,
     format_duration_verbose,
     format_percent,
@@ -15,7 +22,7 @@ from agy_usage.display import (
     strip_ansi,
 )
 from agy_usage.exporter import UsageExporter
-from agy_usage.heatmap import TerminalHeatmap
+from agy_usage.heatmap import HeatmapColor, TerminalHeatmap
 from agy_usage.models import DailyUsage, SessionSummary, StepRecord, TokenUsage
 from agy_usage.parser import (
     decode_varint,
@@ -153,6 +160,89 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         self.assertIn("Fri", rendered)
         self.assertIn("Less", rendered)
         self.assertIn("More", rendered)
+
+    def test_no_color_kill_switch_disables_heatmap_escapes(self):
+        """BUG-004: the shared --no-color switch must strip every ANSI escape, not just Colors."""
+        daily = {date(2026, 9, 1): DailyUsage(date=date(2026, 9, 1), usage=TokenUsage(prompt_tokens=1000))}
+        Colors.set_override(False)
+        self.addCleanup(Colors.set_override, None)
+
+        self.assertFalse(HeatmapColor.supports_color())
+        self.assertNotIn("\033", HeatmapColor.cell(4))
+        rendered = TerminalHeatmap(daily, metric="total", weeks=8, end_date=date(2026, 9, 10)).render()
+        self.assertNotIn("\033", rendered)
+        # Falls back to plain density symbols instead of colored cells.
+        self.assertIn("·", rendered)
+        self.assertIn("█", rendered)
+        self.assertIn("Less", rendered)
+        self.assertIn("More", rendered)
+
+    def test_color_force_on_enables_heatmap_escapes(self):
+        """The same switch can force colors on even when stdout is not a TTY."""
+        daily = {date(2026, 9, 1): DailyUsage(date=date(2026, 9, 1), usage=TokenUsage(prompt_tokens=1000))}
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+
+        self.assertTrue(HeatmapColor.supports_color())
+        self.assertIn("\033[38;", HeatmapColor.cell(2))
+        rendered = TerminalHeatmap(daily, metric="total", weeks=8, end_date=date(2026, 9, 10)).render()
+        self.assertIn("\033[38;", rendered)
+
+    def test_color_auto_detect_paths(self):
+        """BUG-004 (review): the auto-detection path itself is covered deterministically."""
+        Colors.set_override(None)
+        self.addCleanup(Colors.set_override, None)
+        # Hermetic env: no COLORTERM / NO_COLOR inherited from the runner.
+        bare_env = {"PATH": os.environ.get("PATH", "")}
+
+        with mock.patch("sys.stdout.isatty", return_value=True):
+            with mock.patch.dict(os.environ, bare_env, clear=True):
+                self.assertTrue(Colors.enabled())
+                self.assertTrue(HeatmapColor.supports_color())
+        # TTY off + no COLORTERM → disabled.
+        with mock.patch("sys.stdout.isatty", return_value=False):
+            with mock.patch.dict(os.environ, bare_env, clear=True):
+                self.assertFalse(Colors.enabled())
+        # NO_COLOR wins even on a TTY.
+        with mock.patch("sys.stdout.isatty", return_value=True):
+            with mock.patch.dict(os.environ, {**bare_env, "NO_COLOR": "1"}, clear=True):
+                self.assertFalse(Colors.enabled())
+        # COLORTERM still upgrades piped stdout (pre-BUG-009 behavior preserved).
+        with mock.patch("sys.stdout.isatty", return_value=False):
+            with mock.patch.dict(os.environ, {**bare_env, "COLORTERM": "truecolor"}, clear=True):
+                self.assertTrue(Colors.enabled())
+
+    def test_main_no_color_wires_global_switch(self):
+        """BUG-004: cli.main() applies --no-color to the shared switch and cmd_heatmap
+        renders an escape-free heatmap (integration, real render not the early return)."""
+        self.addCleanup(Colors.set_override, None)
+
+        fake = SessionSummary(
+            session_id="abc123def456",
+            source="cli",
+            file_path="/tmp/fake.db",
+            title="Repro session",
+            workspace="/ws/repro",
+            models=["gemini-3-pro"],
+            start_time=datetime(2026, 10, 26, 10, 0, 0),
+            end_time=datetime(2026, 10, 26, 10, 30, 0),
+            step_count=4,
+            usage=TokenUsage(prompt_tokens=5000, cached_tokens=20000, output_tokens=1000),
+        )
+
+        with mock.patch("agy_usage.cli.get_sessions", return_value=[fake]):
+            with redirect_stdout(io.StringIO()) as captured:
+                cli_main(["heatmap", "--no-color"])
+        out = captured.getvalue()
+        self.assertIn("GITHUB-STYLE CONTRIBUTION HEATMAP", out)  # render path reached
+        self.assertNotIn("\033", out)
+
+        # Rather than inheriting the switch from a previous call, main() resets it.
+        Colors.set_override(False)
+        with mock.patch("agy_usage.cli.get_sessions", return_value=[fake]):
+            with redirect_stdout(io.StringIO()):
+                cli_main(["heatmap"])
+        self.assertIsNone(display_mod._COLOR_OVERRIDE)  # reset without the flag
 
     def test_formatting_utilities(self):
         self.assertEqual(format_tokens(1_500_000), "1.50M")

@@ -7,6 +7,12 @@ import shutil
 import sys
 from typing import Any, List, Optional, Tuple
 
+# Module-level color switch (BUG-004). None = auto-detect via Colors.enabled();
+# True/False = forced on/off globally (e.g. by --no-color). Consulted at call
+# time by every renderer (Colors, HeatmapColor) so an override only needs to be
+# applied once — see Colors.set_override().
+_COLOR_OVERRIDE: Optional[bool] = None
+
 
 class Colors:
     """ANSI color codes for terminal styling."""
@@ -33,7 +39,15 @@ class Colors:
     GRAY = "\033[90m"
 
     @classmethod
+    def set_override(cls, value: Optional[bool]) -> None:
+        """Force colors on (True) or off (False) globally; None restores auto-detection."""
+        global _COLOR_OVERRIDE
+        _COLOR_OVERRIDE = value
+
+    @classmethod
     def enabled(cls) -> bool:
+        if _COLOR_OVERRIDE is not None:
+            return _COLOR_OVERRIDE
         if os.environ.get("NO_COLOR"):
             return False
         return sys.stdout.isatty() or os.environ.get("COLORTERM") is not None

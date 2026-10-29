@@ -14,14 +14,14 @@
 
 | Ledger | File | Items | Open | High | Med | Low |
 |--------|------|------:|-----:|-----:|----:|----:|
-| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 24 | 21 | 2 | 10 | 9 |
+| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 24 | 20 | 1 | 10 | 9 |
 | ⚡ Optimizations | [optimizations.md](optimizations.md) | 8 | 8 | 1 | 3 | 4 |
 | 🔧 Improvements | [improvements.md](improvements.md) | 9 | 9 | 0 | 3 | 6 |
 | ✨ Features | [features.md](features.md) | 10 | 10 | n/a | n/a | n/a |
 
 > **Progress:** BUG-001 and BUG-002 fixed by PR #1 (merged, commit `44ecdc2`, merge of
 > `8b95649`, 2026-10-29); BUG-024 was created from its post-merge review.
-> BUG-003 fixed by PR #2 (2026-10-29).
+> BUG-003 fixed by PR #2 (2026-10-29). BUG-004 fixed by PR #3 (2026-10-29).
 
 ---
 
@@ -32,14 +32,14 @@
 | BUG-001 | 🔴 | A | ✅ | `cli.py:87-95` | Global flags fail after subcommand |
 | BUG-002 | 🔴 | A | ✅ | `cli.py:265-269, 319-323` | Root `--json/--csv` silently discarded before `limits`/`statusline` (parse-level clobber fixed; statusline `--csv` split out as BUG-024) |
 | BUG-003 | 🔴 | A | ✅ | `limits.py:210-236` | `parse_token_amount` crashes on `inf`, accepts negatives |
-| BUG-004 | 🔴 | A | ⬜ | `cli.py` + `heatmap.py` | `--no-color` does not disable heatmap colors |
+| BUG-004 | 🔴 | A | ✅ | `cli.py` + `heatmap.py` + `display.py` | `--no-color` does not disable heatmap colors |
 | BUG-005 | 🔴 | B | ⬜ | `limits.py:375-382, 644-649` | Stale quota cache served as authoritative "Live" data (no TTL) |
 | BUG-006 | 🟠 | A | ⬜ | `heatmap.py:178-189` | Month labels drift right, point at wrong weeks (dead `chars_consumed`) |
 | BUG-007 | 🟠 | B | ⬜ | `parser.py:266-269` | Unquoted SQLite URI + silent read-write fallback |
 | BUG-008 | 🟠 | B | ⬜ | `parser.py:549-551` | One exception kills whole session parse (flickering in `live`) |
-| BUG-009 | 🟠 | B | ⬜ | `display.py:36-39, heatmap.py:41-45` | Colors leak into piped output when `COLORTERM` set |
+| BUG-009 | 🟠 | B | ⬜ | `display.py:48-53, heatmap.py:42-44` | Colors leak into piped output when `COLORTERM` set |
 | BUG-010 | 🟠 | B | ⬜ | `parser.py:371-377` | Phantom `gemini-3.8-flash` attribution for unresolvable rows |
-| BUG-011 | 🟠 | B | ⬜ | `cli.py:1035-1054, display.py:93-100` | "Used %" quota colored green (thresholds inverted for `used`) |
+| BUG-011 | 🟠 | B | ⬜ | `cli.py:1035-1054, display.py:107-114` | "Used %" quota colored green (thresholds inverted for `used`) |
 | BUG-012 | 🟠 | B | ⬜ | `limits.py` vs `cli.py:1146-1186` | Health badge thresholds disagree (60/80% vs 80% only) |
 | BUG-013 | 🟠 | B | ⬜ | `limits.py:176-194` | `tokens_remaining` ignores cost/server-fraction quota model |
 | BUG-014 | 🟡 | A | ⬜ | `cli.py` (`-w` flag) | `-w 500` accepted (help says "up to 52"), renders 500 columns |
@@ -49,7 +49,7 @@
 | BUG-018 | 🟡 | B | ⬜ | `limits.py:458-464` + `parser.py:484-486` | mtime fallback drags old steps into 5h window; future-dated step hijacks anchor |
 | BUG-019 | 🟡 | B | ⬜ | `cli.py:1287-1300` | `live` + `--json` semantics incoherent (banner becomes one-shot dump) |
 | BUG-020 | 🟡 | B | ⬜ | `exporter.py:117-119` | `UnicodeEncodeError` on non-UTF-8 stdout (Windows cp1252) |
-| BUG-021 | 🟡 | B | ⬜ | `display.py:42-45` | Nested color calls: inner `RESET` wipes outer attribute |
+| BUG-021 | 🟡 | B | ⬜ | `display.py:56-60` | Nested color calls: inner `RESET` wipes outer attribute |
 | BUG-022 | 🟡 | B | ⬜ | `parser.py:240` | `--dir` path skips chronological re-sort (mtime vs start_time) |
 | BUG-023 | 🟠 | B | ⬜ | `setup.py` + `pyproject.toml` + `__init__.py` | Triplicated metadata/entry-point; no LICENSE file |
 | BUG-024 | 🟠 | A | ⬜ | `cli.py:1222` (`cmd_statusline`) | `statusline --csv` accepted but ignored: prints one-line text, exit 0 (found post-merge by Deepseek review of PR #1; cmd_statusline only reads `args.json`) |
@@ -79,10 +79,18 @@ Note: the originally suggested `if not (val >= 1)` guard was insufficient alone 
 handler covers that path. Known remaining gap (pre-existing, out of scope): huge-but-finite
 values like `"1e308"` are still accepted.
 
-**BUG-004 · `--no-color` doesn't disable the heatmap · 🔴 A**
-`main()` patches `display.Colors` only; `HeatmapColor.cell()` consults its own
-`supports_color()` — RGB escapes still emitted with the patch applied.
-**Fix:** module-level `color_enabled` switch consulted by **both** classes.
+**BUG-004 · `--no-color` doesn't disable the heatmap · 🔴 A** ✅ fixed by PR #3
+`main()` patched `display.Colors` only; `HeatmapColor.cell()` consulted its own
+`supports_color()` — RGB escapes still emitted with the patch applied. `render()`
+also wrapped month header / weekday labels / legend / summary in DIM/BOLD/CYAN
+escapes unconditionally.
+**Fix (shipped):** module-level `display._COLOR_OVERRIDE` switch with
+`Colors.set_override()`; `HeatmapColor.supports_color()` now delegates to
+`Colors.enabled()` and its `wrap()` helper styles text only when colors are on.
+`main()` resets the switch to auto-detect then sets it instead of monkey-patching
+the classmethod. Tests: switch-forced differential render checks (override on/off),
+deterministic auto-detect coverage, and `main()` wiring incl. a real render
+integration pass (38/38 pass).
 
 **BUG-005 · Stale quota cache shown as "Live" · 🔴 B**
 `fetch_live_quota_summary` falls back to `agy_usage_quota_cache.json` whenever the language

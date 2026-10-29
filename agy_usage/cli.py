@@ -1309,9 +1309,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     """Entry point for CLI execution."""
     args = parse_args(argv)
 
+    # Reset the shared switch to auto-detection so repeated in-process calls
+    # (e.g. tests, embedded use) never inherit a previous call's --no-color.
+    Colors.set_override(None)
     if args.no_color:
-        # Disable ANSI
-        Colors.enabled = classmethod(lambda cls: False)
+        # Disable ANSI globally via the shared switch consulted by both
+        # display.Colors and heatmap.HeatmapColor (BUG-004 fix).
+        Colors.set_override(False)
 
     sessions = get_sessions(args)
     sub = args.subcommand
