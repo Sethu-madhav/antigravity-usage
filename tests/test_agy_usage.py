@@ -651,13 +651,29 @@ class TestLimits(unittest.TestCase):
                 estimated_cost=0.0,
             )
 
-        # Healthy
+        # Healthy (<60%)
         b, _ = get_status_badge(make_stats(10, 100), make_stats(10, 100))
         self.assertEqual(b, "🟢")
+        b, _ = get_status_badge(make_stats(59, 100), make_stats(10, 100))
+        self.assertEqual(b, "🟢")
 
-        # High load (>80%)
-        b, _ = get_status_badge(make_stats(85, 100), make_stats(20, 100))
+        # Moderate load (>=60% and <80%, BUG-012)
+        b, msg = get_status_badge(make_stats(60, 100), make_stats(10, 100))
         self.assertEqual(b, "🟡")
+        self.assertIn("MODERATE LOAD", strip_ansi(msg))
+
+        b, msg = get_status_badge(make_stats(75, 100), make_stats(10, 100))
+        self.assertEqual(b, "🟡")
+        self.assertIn("MODERATE LOAD", strip_ansi(msg))
+
+        # High load (>=80%)
+        b, msg = get_status_badge(make_stats(80, 100), make_stats(20, 100))
+        self.assertEqual(b, "🟡")
+        self.assertIn("HIGH LOAD WARNING", strip_ansi(msg))
+
+        b, msg = get_status_badge(make_stats(85, 100), make_stats(20, 100))
+        self.assertEqual(b, "🟡")
+        self.assertIn("HIGH LOAD WARNING", strip_ansi(msg))
 
         # 5h exceeded (>=100%)
         b, _ = get_status_badge(make_stats(100, 100), make_stats(20, 100))
@@ -962,6 +978,152 @@ class TestLimits(unittest.TestCase):
         out_f = buf_f.getvalue().strip()
         self.assertIn("5h:100%", out_f)
         self.assertIn("Wk:100%", out_f)
+
+    def test_badge_thresholds_agreement_bug012(self):
+        """BUG-012: limits and statusline must use shared threshold constants
+        (WARN_MODERATE=60, WARN_HIGH=80, CRIT=100) and agree on health badges."""
+        import argparse
+        import io
+        import json
+        import sys
+        from agy_usage.cli import cmd_limits, cmd_statusline
+        from agy_usage.limits import CRIT, WARN_HIGH, WARN_MODERATE
+
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+
+        # 1. Verify shared constants
+        self.assertEqual(WARN_MODERATE, 60.0)
+        self.assertEqual(WARN_HIGH, 80.0)
+        self.assertEqual(CRIT, 100.0)
+
+        t = datetime.now()
+
+        def make_session(tokens_5h: int) -> SessionSummary:
+            # Pro tier 5h limit is 100M tokens
+            return SessionSummary(
+                session_id="s-bug012",
+                source="cli",
+                file_path="/tmp/bug012.db",
+                title="BUG-012 Badge Agreement",
+                workspace="ws",
+                models=["gemini-3.8-flash"],
+                start_time=t,
+                end_time=t,
+                step_count=1,
+                usage=TokenUsage(prompt_tokens=tokens_5h, cached_tokens=0, output_tokens=0),
+                steps=[StepRecord(step_idx=1, timestamp=t, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=tokens_5h, cached_tokens=0, output_tokens=0))],
+            )
+
+        # Case A: 65% used (Moderate load: between 60% and 80%)
+        # Previously BUG-012 caused limits to show 🟡 and statusline to show 🟢!
+        s_65 = make_session(65_000_000)
+
+        # statusline --json
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            cmd_statusline([s_65], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_sl = json.loads(buf.getvalue())
+
+        # limits --json
+        buf_lim = io.StringIO()
+        try:
+            sys.stdout = buf_lim
+            cmd_limits([s_65], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, json=True, csv=False))
+        finally:
+            sys.stdout = old_stdout
+        data_lim = json.loads(buf_lim.getvalue())
+
+        # Both must agree on the 🟡 badge and warning status
+        self.assertEqual(data_sl["badge"], "🟡")
+        self.assertEqual(data_sl["status"], "warning")
+        self.assertEqual(data_lim["status"], "🟡")
+        self.assertEqual(data_sl["badge"], data_lim["status"])
+
+        # statusline plain mode must show [WARN], not [OK]
+        buf_plain = io.StringIO()
+        try:
+            sys.stdout = buf_plain
+            cmd_statusline([s_65], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=True, tmux=False, json=False, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        out_plain = buf_plain.getvalue()
+        self.assertTrue(out_plain.startswith("[WARN]"))
+        self.assertNotIn("[OK]", out_plain)
+
+        # statusline colored mode: 5h segment must be yellow, badge 🟡
+        buf_ansi = io.StringIO()
+        try:
+            sys.stdout = buf_ansi
+            cmd_statusline([s_65], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=False, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        out_ansi = buf_ansi.getvalue()
+        self.assertIn("🟡", out_ansi)
+        self.assertIn(Colors.yellow("5h:"), out_ansi)
+
+        # Case B: 20% used (Healthy <60%)
+        s_20 = make_session(20_000_000)
+        buf_20 = io.StringIO()
+        try:
+            sys.stdout = buf_20
+            cmd_statusline([s_20], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_20 = json.loads(buf_20.getvalue())
+        self.assertEqual(data_20["badge"], "🟢")
+        self.assertEqual(data_20["status"], "healthy")
+
+        # Case C: 85% used (High load >=80%)
+        s_85 = make_session(85_000_000)
+        buf_85 = io.StringIO()
+        try:
+            sys.stdout = buf_85
+            cmd_statusline([s_85], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_85 = json.loads(buf_85.getvalue())
+        self.assertEqual(data_85["badge"], "🟡")
+        self.assertEqual(data_85["status"], "warning")
+
+        # Case D: 100% used (Exceeded / CRIT)
+        s_100 = make_session(100_000_000)
+        buf_100 = io.StringIO()
+        try:
+            sys.stdout = buf_100
+            cmd_statusline([s_100], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_100 = json.loads(buf_100.getvalue())
+        self.assertEqual(data_100["badge"], "🔴")
+        self.assertEqual(data_100["status"], "critical")
+
+        # Exact boundary tests: 60.0% (WARN_MODERATE) and 80.0% (WARN_HIGH) through cmd_statusline
+        s_60 = make_session(60_000_000)
+        buf_60 = io.StringIO()
+        try:
+            sys.stdout = buf_60
+            cmd_statusline([s_60], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_60 = json.loads(buf_60.getvalue())
+        self.assertEqual(data_60["badge"], "🟡")
+        self.assertEqual(data_60["status"], "warning")
+
+        s_80 = make_session(80_000_000)
+        buf_80 = io.StringIO()
+        try:
+            sys.stdout = buf_80
+            cmd_statusline([s_80], argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, short=False, plain=False, tmux=False, json=True, format=None, no_color=False))
+        finally:
+            sys.stdout = old_stdout
+        data_80 = json.loads(buf_80.getvalue())
+        self.assertEqual(data_80["badge"], "🟡")
+        self.assertEqual(data_80["status"], "warning")
 
 
 class TestPricingAndCostCalculation(unittest.TestCase):
