@@ -87,21 +87,32 @@ class TerminalHeatmap:
         metric: str = "total",
         weeks: Optional[int] = None,
         end_date: Optional[date] = None,
+        term_cols: Optional[int] = None,
     ):
         self.daily_data = daily_data
         self.metric = metric.lower()
         self.end_date = end_date or date.today()
 
         # Determine terminal width and default weeks
-        term_cols = shutil.get_terminal_size((80, 24)).columns
+        self.term_cols = term_cols if term_cols is not None else shutil.get_terminal_size((80, 24)).columns
         # Each week takes 2 characters ("■ "), plus 6 chars for weekday label
-        max_fit_weeks = max(8, (term_cols - 8) // 2)
+        self.max_fit_weeks = max(8, (self.term_cols - 8) // 2)
 
         if weeks is not None:
-            self.num_weeks = max(4, weeks)
+            self.num_weeks = max(4, min(52, weeks))
         else:
             # Default to 26 weeks (half year) if fits, else max fit, but up to 52
-            self.num_weeks = min(26, max_fit_weeks)
+            self.num_weeks = min(26, self.max_fit_weeks)
+
+    @property
+    def required_cols(self) -> int:
+        """Minimum terminal columns required to render heatmap without wrapping."""
+        return self.num_weeks * 2 + 8
+
+    @property
+    def is_terminal_narrow(self) -> bool:
+        """Check if terminal is narrower than required columns."""
+        return self.term_cols < self.required_cols
 
     def _get_metric_val(self, usage: TokenUsage) -> int:
         """Extract requested metric value from TokenUsage."""
