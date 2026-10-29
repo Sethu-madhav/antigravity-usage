@@ -379,7 +379,16 @@ class AntigravityParser:
                                         m_str = normalize_model_name(
                                             f1_v.decode("utf-8", errors="ignore").strip()
                                         )
-                                        if m_str:
+                                        # Placeholders (M-prefixed) and digit
+                                        # artifacts are not model names; letting
+                                        # them seed known_models / enum_to_model
+                                        # is the phantom-attribution failure
+                                        # described in BUG-010.
+                                        if (
+                                            m_str
+                                            and not m_str.startswith("M")
+                                            and not m_str.isdigit()
+                                        ):
                                             model_name = m_str
                                             known_models.add(m_str)
                                     elif f1_f == 20 and isinstance(f1_v, bytes):
@@ -417,14 +426,24 @@ class AntigravityParser:
                     # inherit the human-readable model name discovered in the same session.
                     for last_step_idx, raw_name, enum_num in gm_rows:
                         resolved = raw_name
-                        if (not resolved or resolved.startswith("M")) and enum_num is not None:
+                        # Bare enum numbers ("MODEL_PLACEHOLDER_33") are keys,
+                        # not names — let the enum mapping resolve them the same
+                        # way M-prefixed placeholders are resolved.
+                        if (
+                            not resolved or resolved.startswith("M") or resolved.isdigit()
+                        ) and enum_num is not None:
                             resolved = enum_to_model.get(enum_num, resolved)
                         resolved = normalize_model_name(resolved)
-                        if resolved and not resolved.startswith("M"):
+                        # BUG-010: a gen_metadata row earns an entry in
+                        # known_models and an attribution anchor only when its
+                        # model name fully resolves; unresolvable names (empty,
+                        # M-placeholder, bare enum number) must never fabricate
+                        # the hardcoded default into the model distribution.
+                        if resolved and not resolved.startswith("M") and not resolved.isdigit():
                             known_models.add(resolved)
-                        if resolved and last_step_idx >= 0:
-                            step_to_model[last_step_idx] = resolved
-                            step_to_model[last_step_idx + 1] = resolved
+                            if last_step_idx >= 0:
+                                step_to_model[last_step_idx] = resolved
+                                step_to_model[last_step_idx + 1] = resolved
                 except Exception:
                     pass
 
