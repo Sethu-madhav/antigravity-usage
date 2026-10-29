@@ -14,7 +14,7 @@
 
 | Ledger | File | Items | Open | High | Med | Low |
 |--------|------|------:|-----:|-----:|----:|----:|
-| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 26 | 18 | 0 | 7 | 11 |
+| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 26 | 17 | 0 | 7 | 10 |
 | ⚡ Optimizations | [optimizations.md](optimizations.md) | 8 | 8 | 1 | 3 | 4 |
 | 🔧 Improvements | [improvements.md](improvements.md) | 9 | 9 | 0 | 3 | 6 |
 | ✨ Features | [features.md](features.md) | 10 | 10 | n/a | n/a | n/a |
@@ -54,7 +54,7 @@
 | BUG-011 | 🟠 | B | ⬜ | `cli.py:1035-1054, display.py:107-114` | "Used %" quota colored green (thresholds inverted for `used`) |
 | BUG-012 | 🟠 | B | ⬜ | `limits.py` vs `cli.py:1146-1186` | Health badge thresholds disagree (60/80% vs 80% only) |
 | BUG-013 | 🟠 | B | ✅ | `limits.py:176-194` | `tokens_remaining` ignores cost/server-fraction quota model (fixed by PR #12, merge `536926b`) |
-| BUG-014 | 🟡 | A | ⬜ | `cli.py` (`-w` flag) | `-w 500` accepted (help says "up to 52"), renders 500 columns |
+| BUG-014 | 🟡 | A | ✅ | `cli.py` (`-w` flag) | `-w 500` accepted (help says "up to 52"), renders 500 columns (fixed by PR #14, merge `359cf2d`) |
 | BUG-015 | 🟡 | B | ⬜ | `parser.py:242-243` | No dedup: session in both CLI+IDE dirs → tokens double-counted |
 | BUG-016 | 🟡 | B | ⬜ | `parser.py:213-217, 246-251` | `getmtime` in sort key crashes whole scan if DB vanishes mid-scan |
 | BUG-017 | 🟡 | B | ⬜ | `parser.py:15-26` | Unbounded varint decode (no 10-byte/64-bit cap) |
@@ -182,9 +182,17 @@ server fraction exhausted/partial, cost limit exceeded/partial, token clamping/p
 and zero limit (76/76 suite pass). Reviewed by Claude Sonnet 5.5: APPROVE WITH NITS;
 merged as commit `536926b` (2026-10-29).
 
-**BUG-014 · `-w` unclamped · 🟡 A**
+**BUG-014 · `-w` unclamped · 🟡 A** ✅ fixed by PR #14
 `parse_args(["heatmap", "-w", "500"])` → accepted; help says "up to 52" → 2,000+ char
-output wraps into garbage. **Fix:** `max(4, min(52, weeks))` + terminal-width warning.
+output wraps into garbage.
+**Fix (shipped):** `-w`/`--weeks` clamped to `[4, 52]` (`max(4, min(52, weeks))`) in both
+`parse_args` (`cli.py`) and `TerminalHeatmap.__init__` (`heatmap.py`); `required_cols` and
+`is_terminal_narrow` added to `TerminalHeatmap`; yellow warning emitted in `cmd_heatmap`
+when terminal width is narrower than required columns (respects `--no-color`). Tests:
+`parse_args` clamping across boundaries (-10, 0, 1, 4, 26, 52, 100, 500), `TerminalHeatmap`
+clamping, terminal width / narrow detection, and `cmd_heatmap` warning output with/without
+color (80/80 suite pass). Reviewed by Claude Sonnet 5.5: APPROVE WITH NITS; merged as commit
+`359cf2d` (2026-10-29).
 
 **BUG-015 · No dedup across CLI/IDE dirs · 🟡 B**
 Same DB in both dirs: tokens summed twice while session counts dedupe by `session_id`
