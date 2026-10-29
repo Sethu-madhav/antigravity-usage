@@ -46,9 +46,7 @@ class HeatmapColor:
     @classmethod
     def wrap(cls, text: str, code: str) -> str:
         """Style text with an ANSI code, or return it plain when colors are disabled."""
-        if not cls.supports_color():
-            return text
-        return f"{code}{text}{cls.RESET}"
+        return Colors.color(text, code)
 
     @classmethod
     def supports_truecolor(cls) -> bool:
