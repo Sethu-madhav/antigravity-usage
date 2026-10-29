@@ -187,10 +187,12 @@ class TerminalHeatmap:
         while col_idx < self.num_weeks:
             if col_idx in month_positions:
                 name = month_positions[col_idx]
-                month_header_str += name + " " * max(0, 2 - len(name))
-                # Skip length of printed label in column spaces
-                chars_consumed = 2
-                col_idx += 1
+                # BUG-006: a month name spans ceil(len / 2) of the 2-char week
+                # columns; skip exactly those columns so later labels don't drift
+                # right and point at the wrong weeks.
+                cols_skip = max(1, -(-len(name) // 2))
+                month_header_str += name.ljust(cols_skip * 2)
+                col_idx += cols_skip
             else:
                 month_header_str += "  "
                 col_idx += 1
