@@ -937,6 +937,17 @@ def _csv_quota_cells(w) -> list:
     return [f"{w.pct_remaining:.1f}%", f"{w.pct_used:.1f}%", w.tokens_remaining]
 
 
+def _cache_age_text(age_seconds: Optional[float]) -> str:
+    """'8 min ago' style age of a cached server reading."""
+    if age_seconds is None:
+        return "age unknown"
+    minutes = int(age_seconds // 60)
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes} min ago" if minutes else f"{hours} h ago"
+
+
 def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
     """Display 5-hour rolling limit and weekly quota limits across Gemini, Argon, and Claude pools."""
     tier = getattr(args, "tier", "pro") or "pro"
@@ -983,6 +994,9 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
             "checked_at": now_str,
             "live_synced": pools.live_synced,
             "live_error": pools.live_error,
+            "quota_source": pools.quota_source,
+            "cache_fetched_at": pools.cache_fetched_at.isoformat() if pools.cache_fetched_at else None,
+            "cache_age_seconds": None if pools.cache_age_seconds is None else int(pools.cache_age_seconds),
             "status": badge,
             "pool": "Gemini Models",
             "five_hour_window": _window_to_dict(w_5h),
@@ -1013,6 +1027,10 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
 
     if pools.live_synced:
         sync_tag = Colors.green("Live Antigravity Server + Local DB")
+    elif pools.quota_source == "cached":
+        sync_tag = Colors.cyan(
+            f"Last server reading, {_cache_age_text(pools.cache_age_seconds)} (Antigravity server not reachable now)"
+        )
     elif pools.live_error is not None:
         sync_tag = Colors.yellow("Local estimate, this device only (Antigravity server not reachable)")
     else:

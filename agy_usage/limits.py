@@ -245,6 +245,12 @@ class MultiPoolLimits:
     claude_7d: WindowStats
     live_synced: bool = False
     live_error: Optional[str] = None
+    # Where the server fractions came from: "live" (the language_server just
+    # answered), "cached" (the last server reading on disk, server unreachable
+    # now), or "local" (no server data, local DB estimate only).
+    quota_source: str = "local"
+    cache_fetched_at: Optional[datetime] = None
+    cache_age_seconds: Optional[float] = None
 
 
 def parse_token_amount(text: Optional[str]) -> Optional[int]:
@@ -337,6 +343,12 @@ _QUOTA_CACHE_PATH = os.path.expanduser(
 # remainingFractions in place of a live server response.
 _QUOTA_CACHE_TTL_SECONDS = 60.0
 
+# A cache older than the TTL but younger than this is still the last word the
+# server gave about this account (local DBs only see this device's usage), so
+# it is returned tagged ``"source": "cached"`` and shown with its age, never as
+# live. Buckets whose resetTime has passed are still dropped downstream.
+_QUOTA_CACHE_MAX_AGE_SECONDS = 6 * 3600.0
+
 
 def fetch_live_quota_summary(
     use_cache: bool = True, errors: Optional[List[str]] = None
@@ -345,8 +357,10 @@ def fetch_live_quota_summary(
 
     Calls ``RetrieveUserQuotaSummary`` and ``GetUserStatus`` on the localhost port
     of the running Antigravity ``language_server`` process (if active), falling back
-    to the last cached response on disk only while it is fresh (BUG-005: a cache
-    older than ~60s is rejected so it is never rendered as live server data).
+    to the last cached response on disk. A cache up to ~60s old is returned as is.
+    An older one, up to ``_QUOTA_CACHE_MAX_AGE_SECONDS``, is returned with
+    ``"source": "cached"`` so callers never render it as live server data
+    (BUG-005). Older caches, or caches with no buckets, are rejected.
 
     When ``errors`` is a list, a short reason is appended for each step that
     failed, so callers can tell the user why live data is missing.
@@ -482,6 +496,13 @@ def fetch_live_quota_summary(
                     if age <= timedelta(seconds=_QUOTA_CACHE_TTL_SECONDS):
                         return cached
                     _note(f"cached server reading is {int(age.total_seconds() // 60)} min old")
+                    if (
+                        age <= timedelta(seconds=_QUOTA_CACHE_MAX_AGE_SECONDS)
+                        and isinstance(cached["buckets"], dict)
+                        and cached["buckets"]
+                    ):
+                        cached["source"] = "cached"
+                        return cached
         except Exception:
             pass
     return None
@@ -769,7 +790,30 @@ class LimitsCalculator:
         live_errors: List[str] = []
         live_data = fetch_live_quota_summary(errors=live_errors) if use_live_server else None
         live_buckets = (live_data or {}).get("buckets", {}) if live_data else {}
-        live_synced = bool(live_buckets)
+        from_cache = bool(live_data) and live_data.get("source") == "cached"
+        cache_fetched_at: Optional[datetime] = None
+        if from_cache:
+            # Only buckets whose cycle is still running say anything about now.
+            running: Dict[str, Dict[str, Any]] = {}
+            for bid, b in live_buckets.items():
+                if not isinstance(b, dict):
+                    continue
+                reset_dt = _parse_utc_iso_to_local_naive(b.get("resetTime"))
+                if reset_dt is not None and reset_dt > current_time:
+                    running[bid] = b
+            live_buckets = running
+            if live_buckets:
+                cache_fetched_at = _parse_fetched_at(live_data.get("fetched_at"))
+            else:
+                live_errors.append("every cached quota cycle has since reset")
+        has_server_buckets = bool(live_buckets)
+        live_synced = has_server_buckets and not from_cache
+        if live_synced:
+            quota_source = "live"
+        elif has_server_buckets:
+            quota_source = "cached"
+        else:
+            quota_source = "local"
         live_error: Optional[str] = None
         if use_live_server and not live_synced:
             live_error = "; ".join(live_errors) or "server returned no quota buckets"
@@ -789,7 +833,7 @@ class LimitsCalculator:
             cost_limit_5h_usd=None if g5_custom or not use_live_server else tier.five_hour_cost_usd,
             cost_limit_7d_usd=None if g7_custom or not use_live_server else tier.weekly_cost_usd,
         )
-        if live_synced:
+        if has_server_buckets:
             gemini_5h = LimitsCalculator._apply_bucket_calibration(
                 gemini_5h,
                 live_buckets.get("gemini-5h"),
@@ -836,7 +880,7 @@ class LimitsCalculator:
             )
             if calibrated is not None and calibrated > 0:
                 argon_7d.limit_tokens = calibrated
-        elif live_synced and "gemini-argon-wtu-weekly" in live_buckets:
+        elif has_server_buckets and "gemini-argon-wtu-weekly" in live_buckets:
             argon_7d = LimitsCalculator._apply_bucket_calibration(
                 argon_7d,
                 live_buckets.get("gemini-argon-wtu-weekly"),
@@ -870,7 +914,7 @@ class LimitsCalculator:
             cost_limit_5h_usd=None if c5_custom or not use_live_server else tier.claude_five_hour_cost_usd,
             cost_limit_7d_usd=None if c7_custom or not use_live_server else tier.claude_weekly_cost_usd,
         )
-        if live_synced:
+        if has_server_buckets:
             claude_5h = LimitsCalculator._apply_bucket_calibration(
                 claude_5h,
                 live_buckets.get("3p-5h"),
@@ -901,6 +945,13 @@ class LimitsCalculator:
             claude_7d=claude_7d,
             live_synced=live_synced,
             live_error=live_error,
+            quota_source=quota_source,
+            cache_fetched_at=cache_fetched_at,
+            cache_age_seconds=(
+                max(0.0, (datetime.now(timezone.utc) - cache_fetched_at).total_seconds())
+                if cache_fetched_at is not None
+                else None
+            ),
         )
 
 
