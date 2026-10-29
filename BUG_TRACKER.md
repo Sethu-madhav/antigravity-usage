@@ -1,6 +1,6 @@
 # Bug Tracker — agy-usage
 
-> **Baseline:** commit `a2904b2` (branch `master`) · Audited 2026-10-28 · Scope: full codebase (~5,000 LOC) · Test suite: **29/29 passing**
+> **Baseline:** commit `cda76f5` (audit of `a2904b2`, 2026-10-28; ~5,000 LOC; suite was 29/29 then)
 >
 > **Confidence legend:**
 > **A** = reproduced at runtime · **B** = confirmed by code trace (single-source of failure, quoted evidence)
@@ -12,12 +12,12 @@
 
 ## Summary
 
-| Category | Open | High | Med | Low |
-|----------|-----:|-----:|----:|----:|
-| 🐛 Bugs       | 22 | 3 | 10 | 9 |
-| ⚡ Optimizations | 8 | 1 | 3 | 4 |
-| 🔧 Improvements | 9 | 0 | 3 | 6 |
-| ✨ Feature ideas | 10 | — | — | — |
+| Ledger | File | Items | Open | High | Med | Low |
+|--------|------|------:|-----:|-----:|----:|----:|
+| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 24 | 22 | 3 | 10 | 9 |
+| ⚡ Optimizations | [optimizations.md](optimizations.md) | 8 | 8 | 1 | 3 | 4 |
+| 🔧 Improvements | [improvements.md](improvements.md) | 9 | 9 | 0 | 3 | 6 |
+| ✨ Features | [features.md](features.md) | 10 | 10 | n/a | n/a | n/a |
 
 > **Progress:** BUG-001 and BUG-002 fixed by PR #1 (merged, commit `44ecdc2`, merge of
 > `8b95649`, 2026-10-29). BUG-024 was created from its post-merge review.
@@ -55,17 +55,17 @@
 
 ### Details
 
-**BUG-001 · Global flags fail after subcommand · 🔴 A**
-`agy-usage sessions --no-color`, `current --json`, `heatmap --csv` all hard-fail with
-`error: unrecognized arguments` — shared flags exist only on the root parser.
-Repro: `parse_args(["sessions", "--no-color"])` → SystemExit.
-**Fix:** shared parent parser (`add_help=False`) passed via `parents=[common]` to every subparser.
+**BUG-001 · Global flags fail after subcommand · 🔴 A** ✅ fixed by PR #1
+`agy-usage sessions --no-color`, `current --json`, `heatmap --csv` all hard-failed with
+`error: unrecognized arguments` — shared flags existed only on the root parser.
+**Fix (shipped):** hidden parent parser (`add_help=False`) passed via `parents=[common]`
+to every subparser; commit `8b95649`.
 
-**BUG-002 · Root `--json --csv` discarded before `limits`/`statusline` · 🔴 A**
-Those subparsers re-declare the flags with `store_true` defaults; argparse merges the
-subparser namespace over the root's.
-Repro: `parse_args(["--json", "limits"])` → `json=False` → silent text output instead of JSON.
-**Fix:** re-declare with `default=argparse.SUPPRESS` (or the BUG-001 parent-parser fix).
+**BUG-002 · Root `--json/--csv` discarded before `limits`/`statusline` · 🔴 A** ✅ fixed by PR #1
+Subparser re-declared flags merged over root-level parsed values.
+**Fix (shipped):** parent copies use `default=argparse.SUPPRESS`; local re-declarations
+removed. Parse-level behavior verified end-to-end for `limits` JSON/CSV. The statusline
+CSV gap is carved out as BUG-024.
 
 **BUG-003 · `parse_token_amount` crashes on `inf`, accepts negatives · 🔴 A**
 Only `ValueError` is caught. Repro: `"inf"` → `OverflowError`, `"1e309"` → `OverflowError`,
@@ -158,7 +158,8 @@ renders 0% used. **Fix:** clamp fallback to `[first_ts, now]`; skip steps > now 
 **BUG-019 · `live` + `--json` incoherent · 🟡 B**
 `--json live` (root form) runs one-shot JSON export and returns — never reaches
 `cmd_live`; `live --json` errors out (BUG-001). **Fix:** document/reject clearly, or
-implement JSON-per-tick with `--interval`.
+implement JSON-per-tick with `--interval`. Decide together with FEAT-007
+(see features.md) and BUG-024.
 
 **BUG-020 · `UnicodeEncodeError` on Windows consoles · 🟡 B**
 `sys.stdout.write(content)` uses console encoding (cp1252) — titles with emoji/CJK crash
@@ -184,8 +185,8 @@ is a third version source (feeds `-v`). Benign today (setuptools ≥61 prefers
 add LICENSE; use SPDX `license = "MIT"`.
 
 **BUG-024 · `statusline --csv` silently ignored · 🟠 A**
-Discovered by the Deepseek pre-release review of PR #1 (it examined the branch after the
-user merged it; verdict REQUEST CHANGES). `cmd_statusline` never reads `args.csv`, so both
+Discovered by the Deepseek review of PR #1 (it examined the branch after the user merged
+it; verdict REQUEST CHANGES). `cmd_statusline` never reads `args.csv`, so both
 `agy-usage --csv statusline` and `agy-usage statusline --csv` render the normal one-line
 status text and exit 0. Pre-fix (b06314f) the invocation even parsed True already, which
 also makes the old test assertion `['--csv','statusline']` vacuous. Related review note:
@@ -199,67 +200,13 @@ exit 2) and drop `--csv` from statusline's help. Also drop or replace the vacuou
 
 ---
 
-## ⚡ Optimizations
-
-| ID | Sev | Status | Location | Summary |
-|----|-----|--------|----------|---------|
-| OPT-001 | 🔴 | ⬜ | `parser.py` (all entry points) | No incremental parse cache — every command re-parses every DB |
-| OPT-002 | 🟠 | ⬜ | `cli.py:832-844` | `live`: full re-scan per tick, screen cleared *before* slow work, daily agg run 2×/tick |
-| OPT-003 | 🟠 | ⬜ | `models.py:330-333, 377-382` | `step.cost`/`s.cost` re-price on every access; `get_rates` substring-scan unmemoized |
-| OPT-004 | 🟡 | ⬜ | `aggregator.py:64,97,177` | `aggregate_daily` recomputed ~3× per run (7× per JSON export) |
-| OPT-005 | 🟡 | ⬜ | `limits.py:654-735` | `_collect_pool_items` called 3×, re-walking every step + `classify_model_pool` |
-| OPT-006 | 🟡 | ⬜ | `parser.py:503-507` | O(n·m) reverse linear scan over model anchors per step |
-| OPT-007 | 🟡 | ⬜ | `display.py:276-292` | ANSI regex recompiled per cell |
-| OPT-008 | 🟡 | ⬜ | `parser.py:453-456` | `cursor.fetchall()` materializes all blobs before processing |
-
-**OPT-001 (top win):** statusline/<70ms claim + `live` watch re-decode every frozen old DB on
-every invocation. **Fix:** cache parsed `SessionSummary` per `(path, size, mtime)` in
-`~/.cache/agy-usage/` (stdlib json); re-parse only changed files. pairs with BUG-008 (also
-live-probes `ps`/`lsof`/HTTP with 1–1.5 s timeouts, no TTL on cache).
-Fixes: cached_property on the two cost props + dict memo for exact model names.
-
----
-
-## 🔧 Improvements
-
-| ID | Sev | Status | Summary |
-|----|-----|--------|---------|
-| IMP-001 | 🟠 | ⬜ | Exit codes + stderr discipline: `main()` always returns 0; "not found"/"no data" prints to stdout → breaks `| jq` pipelines. Return 1; route messages to stderr |
-| IMP-002 | 🟠 | ⬜ | Warn on silently-ignored inputs: `--5h-limit 5OM` typo → tier default with no warning; `--tmux` ignores `--short/--plain`; `--json --csv` precedence unannounced; `--dir`+`--cli-only` co-accepted (see BUG-005 family) |
-| IMP-003 | 🟠 | ⬜ | Unified color gating: `Colors`/`HeatmapColor` duplicate logic (source of BUG-004); no `TERM=dumb` check; macOS blanket-truecolor even under tmux |
-| IMP-004 | 🟡 | ⬜ | Truncation hygiene: `[:25]`/`[:35]` slices cut mid-word, no ellipsis — `display.truncate_ansi()` exists and is unused |
-| IMP-005 | 🟡 | ⬜ | `heatmap --details` lists all-time active days beneath a "last N weeks" grid — label/scope mismatch |
-| IMP-006 | 🟠 | ⬜ | Test gaps: `parse_token_amount` edges (would catch BUG-003), `fetch_live_quota_summary` never mocked, exporter stdout paths untested; limits/statusline tests only accidentally hermetic (fake `/tmp/*.db` path live-probes if it exists) |
-| IMP-007 | 🟡 | ⬜ | Stale epilog: `--help` omits `current`, `limits`, `statusline`, `live`, `monthly`, `--no-color` |
-| IMP-008 | 🟡 | ⬜ | CSV emits formatted strings ("95.0%", "$3.91") — emit raw floats; statusline JSON lacks `badge_plain`/CSV parity; add NDJSON |
-| IMP-009 | 🟡 | ⬜ | Add LICENSE file; SPDX license string; gitignore: add `.pytest_cache/`, `.coverage`, `.mypy_cache/`, `.ruff_cache/` |
-
----
-
-## ✨ Feature Ideas
-
-| ID | Idea | One-liner |
-|----|------|-----------|
-| FEAT-001 | `--since` / `--until` global date filters | Single choke point in `get_sessions()`; TerminalHeatmap already parameterizes by `end_date` |
-| FEAT-002 | Burn-rate projection | "At current pace the 5h cap is hit at ~17:40" — inputs already computed in `limits.py` |
-| FEAT-003 | Tier auto-detect | `GetUserStatus` already returns `user_tier_id` — map to Free/Pro/Ultra when `--tier` omitted |
-| FEAT-004 | Sparkline in `statusline --short` | `render_sparkline()` is fully implemented and unused; 7-day token sparkline nearly free |
-| FEAT-005 | macOS notifications | `osascript` hook on 🔴/🟡 threshold transitions — stays zero-dependency |
-| FEAT-006 | `workspaces` subcommand | Ranked per-project token/cost leaderboard ("where did my quota go") |
-| FEAT-007 | Per-command JSON | `session <id> --json` emits that session (+ steps); today `--json` dumps everything |
-| FEAT-008 | New heatmap metrics | Cache-efficiency + hour-of-day/qta-peak: aggregator-only change, `metric=` arg exists |
-| FEAT-009 | `limits --watch N` / `--ics` | Wall-mounted quota monitor reusing the `live` loop; `.ics` feed of predicted resets |
-| FEAT-010 | Width-aware tables | Auto-shrink Title/Workspace columns via `shutil.get_terminal_size` + `truncate_ansi` |
-
----
-
 ## Suggested order of work
 
-1. **Quick wins batch** (CLI-facing, cheap): BUG-001, BUG-002, BUG-003, BUG-014, BUG-023
-2. **Perf batch:** OPT-001 (+ BUG-008 statusline/live probe TTL) — makes the <70 ms claim real
-3. **Correctness batch:** BUG-005 (stale "Live" quota), BUG-007 (URI), BUG-010 (phantom model), BUG-011/012 (colors for used %, badge consistency)
-4. **Robustness batch:** BUG-008/016/017/018 + IMP-006 tests, then the rest by priority
+1. **Quick wins batch** (CLI-facing, cheap): BUG-003, BUG-014, BUG-023, BUG-024
+2. **Perf batch:** [optimizations.md](optimizations.md) OPT-001 (pairs with BUG-005's cache-TTL discipline)
+3. **Correctness batch:** BUG-005, BUG-007, BUG-010, BUG-011/012
+4. **Robustness batch:** BUG-008/016/017/018 + [improvements.md](improvements.md) IMP-006 tests, then the rest by priority
 
 ---
 
-*Generated by a 3-agent code audit tracked against commit `a2904b2`. Confidence: A = runtime-reproduced, B = code-trace confirmed. Verify IDs against source before fixing if rebased.*
+*Generated by a 3-agent code audit of commit `a2904b2` on 2026-10-28; PR #1 (BUG-001/002) merged 2026-10-29. Confidence: A = runtime-reproduced, B = code-trace confirmed. Verify IDs against source before fixing if rebased.*
