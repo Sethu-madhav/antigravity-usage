@@ -28,6 +28,12 @@ from agy_usage.models import (
 )
 
 
+# Shared quota warning and critical thresholds in percentage consumed (BUG-012)
+WARN_MODERATE: float = 60.0
+WARN_HIGH: float = 80.0
+CRIT: float = 100.0
+
+
 def classify_model_pool(model_name: str) -> str:
     """Classify a model name into its independent Antigravity quota pool.
 
@@ -827,7 +833,7 @@ def render_gauge_bar(pct: float, width: int = 24) -> str:
 
     if pct >= 85.0:
         colored_bar = Colors.red(bar_str)
-    elif pct >= 60.0:
+    elif pct >= WARN_MODERATE:
         colored_bar = Colors.yellow(bar_str)
     else:
         colored_bar = Colors.green(bar_str)
@@ -845,7 +851,7 @@ def render_remaining_bar(pct_remaining: float, width: int = 24) -> str:
 
     if pct_remaining <= 15.0:
         colored_bar = Colors.red(bar_str)
-    elif pct_remaining <= 40.0:
+    elif pct_remaining <= (100.0 - WARN_MODERATE):
         colored_bar = Colors.yellow(bar_str)
     else:
         colored_bar = Colors.green(bar_str)
@@ -862,32 +868,32 @@ def get_status_badge(
     claude_7d: Optional[WindowStats] = None,
 ) -> Tuple[str, str]:
     """Return status emoji badge and human-readable diagnostic message."""
-    if w_7d.is_exceeded:
+    if w_7d.is_exceeded or w_7d.pct_used >= CRIT:
         return "🔴", Colors.bold(
             Colors.red("GEMINI WEEKLY LIMIT REACHED (Risk of lockout until weekly cycle reset)")
         )
-    if argon_7d is not None and (argon_7d.usage.total_tokens > 0 or argon_7d.server_remaining_fraction is not None) and argon_7d.is_exceeded:
+    if argon_7d is not None and (argon_7d.usage.total_tokens > 0 or argon_7d.server_remaining_fraction is not None) and (argon_7d.is_exceeded or argon_7d.pct_used >= CRIT):
         return "🔴", Colors.bold(
             Colors.red("GEMINI 4 ARGON WEEKLY LIMIT REACHED (Switch to Gemini Flash until Argon cycle resets)")
         )
-    if claude_7d is not None and (claude_7d.usage.total_tokens > 0 or claude_7d.server_remaining_fraction is not None) and claude_7d.is_exceeded:
+    if claude_7d is not None and (claude_7d.usage.total_tokens > 0 or claude_7d.server_remaining_fraction is not None) and (claude_7d.is_exceeded or claude_7d.pct_used >= CRIT):
         return "🔴", Colors.bold(
             Colors.red("CLAUDE & GPT WEEKLY LIMIT REACHED (Use Gemini models or AI credits until reset)")
         )
-    if w_5h.is_exceeded:
+    if w_5h.is_exceeded or w_5h.pct_used >= CRIT:
         return "🔴", Colors.bold(
             Colors.red("GEMINI 5-HOUR LIMIT REACHED (Cooling down until 5-hour window refreshes)")
         )
-    if claude_5h is not None and (claude_5h.usage.total_tokens > 0 or claude_5h.server_remaining_fraction is not None) and claude_5h.is_exceeded:
+    if claude_5h is not None and (claude_5h.usage.total_tokens > 0 or claude_5h.server_remaining_fraction is not None) and (claude_5h.is_exceeded or claude_5h.pct_used >= CRIT):
         return "🔴", Colors.bold(
             Colors.red("CLAUDE & GPT 5-HOUR LIMIT REACHED (Weekly limit paused until 5-hour window refreshes)")
         )
 
     all_windows = [w for w in (w_5h, w_7d, argon_7d, claude_5h, claude_7d) if w is not None]
-    if any(w.pct_used >= 80.0 for w in all_windows):
+    if any(w.pct_used >= WARN_HIGH for w in all_windows):
         return "🟡", Colors.bold(
             Colors.yellow("HIGH LOAD WARNING (Approaching quota limits on one or more model pools)")
         )
-    if any(w.pct_used >= 60.0 for w in all_windows):
+    if any(w.pct_used >= WARN_MODERATE for w in all_windows):
         return "🟡", Colors.yellow("MODERATE LOAD (Active window consumption, steady pace)")
     return "🟢", Colors.green("HEALTHY (All sprint and weekly quotas are well within safe thresholds)")
