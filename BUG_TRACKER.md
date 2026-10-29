@@ -14,13 +14,14 @@
 
 | Ledger | File | Items | Open | High | Med | Low |
 |--------|------|------:|-----:|-----:|----:|----:|
-| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 24 | 22 | 3 | 10 | 9 |
+| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 24 | 21 | 2 | 10 | 9 |
 | ⚡ Optimizations | [optimizations.md](optimizations.md) | 8 | 8 | 1 | 3 | 4 |
 | 🔧 Improvements | [improvements.md](improvements.md) | 9 | 9 | 0 | 3 | 6 |
 | ✨ Features | [features.md](features.md) | 10 | 10 | n/a | n/a | n/a |
 
 > **Progress:** BUG-001 and BUG-002 fixed by PR #1 (merged, commit `44ecdc2`, merge of
-> `8b95649`, 2026-10-29). BUG-024 was created from its post-merge review.
+> `8b95649`, 2026-10-29); BUG-024 was created from its post-merge review.
+> BUG-003 fixed by PR #2 (2026-10-29).
 
 ---
 
@@ -30,7 +31,7 @@
 |-----|-----|------|--------|----------|---------|
 | BUG-001 | 🔴 | A | ✅ | `cli.py:87-95` | Global flags fail after subcommand |
 | BUG-002 | 🔴 | A | ✅ | `cli.py:265-269, 319-323` | Root `--json/--csv` silently discarded before `limits`/`statusline` (parse-level clobber fixed; statusline `--csv` split out as BUG-024) |
-| BUG-003 | 🔴 | A | ⬜ | `limits.py:210-228` | `parse_token_amount` crashes on `inf`, accepts negatives |
+| BUG-003 | 🔴 | A | ✅ | `limits.py:210-236` | `parse_token_amount` crashes on `inf`, accepts negatives |
 | BUG-004 | 🔴 | A | ⬜ | `cli.py` + `heatmap.py` | `--no-color` does not disable heatmap colors |
 | BUG-005 | 🔴 | B | ⬜ | `limits.py:375-382, 644-649` | Stale quota cache served as authoritative "Live" data (no TTL) |
 | BUG-006 | 🟠 | A | ⬜ | `heatmap.py:178-189` | Month labels drift right, point at wrong weeks (dead `chars_consumed`) |
@@ -67,17 +68,16 @@ Subparser re-declared flags merged over root-level parsed values.
 removed. Parse-level behavior verified end-to-end for `limits` JSON/CSV. The statusline
 CSV gap is carved out as BUG-024.
 
-**BUG-003 · `parse_token_amount` crashes on `inf`, accepts negatives · 🔴 A**
-Only `ValueError` is caught. Repro: `"inf"` → `OverflowError`, `"1e309"` → `OverflowError`,
+**BUG-003 · `parse_token_amount` crashes on `inf`, accepts negatives · 🔴 A** ✅ fixed by PR #2
+Only `ValueError` was caught. Repro: `"inf"` → `OverflowError`, `"1e309"` → `OverflowError`,
 `"-5M"` → `-5000000`.
-**Fix:**
-```python
-val = float(s) * multiplier
-if not (val >= 1):  # rejects NaN, inf, negatives, 0
-    return None
-return int(val)
-# except (ValueError, OverflowError) -> None
-```
+**Fix (shipped):** `int(float(s) * multiplier)` wrapped in `except (ValueError, OverflowError)`
+→ None; results `< 1` rejected, so negatives, zero, and sub-token fractions fall back to the
+tier defaults (downstream honors custom limits only when positive).
+Note: the originally suggested `if not (val >= 1)` guard was insufficient alone —
+`inf >= 1` is True in Python, so infinity still reached `int()` and crashed; the exception
+handler covers that path. Known remaining gap (pre-existing, out of scope): huge-but-finite
+values like `"1e308"` are still accepted.
 
 **BUG-004 · `--no-color` doesn't disable the heatmap · 🔴 A**
 `main()` patches `display.Colors` only; `HeatmapColor.cell()` consults its own

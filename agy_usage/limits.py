@@ -208,7 +208,12 @@ class MultiPoolLimits:
 
 
 def parse_token_amount(text: Optional[str]) -> Optional[int]:
-    """Parse string representations like '50M', '1.5B', '200K' into integer tokens."""
+    """Parse string representations like '50M', '1.5B', '200K' into integer tokens.
+
+    Returns None for anything that is not a positive, finite token count of at
+    least 1: unparseable text, NaN, infinity, negatives, zero, and positive
+    fractions below 1 token (int() truncation).
+    """
     if not text:
         return None
     s = text.strip().upper()
@@ -223,9 +228,14 @@ def parse_token_amount(text: Optional[str]) -> Optional[int]:
         multiplier = 1_000
         s = s[:-1]
     try:
-        return int(float(s) * multiplier)
-    except ValueError:
+        tokens = int(float(s) * multiplier)
+    except (ValueError, OverflowError):
+        # ValueError: unparseable text or NaN; OverflowError: infinity
+        # (e.g. "inf", "1e309") or float multiplication overflowing to inf.
         return None
+    if tokens < 1:  # rejects negatives and zero
+        return None
+    return tokens
 
 
 def calibrate_limit_from_remaining(
