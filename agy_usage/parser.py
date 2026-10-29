@@ -8,6 +8,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import quote
 
 from agy_usage.models import SessionSummary, StepRecord, TokenUsage, normalize_model_name
 
@@ -262,11 +263,13 @@ class AntigravityParser:
 
         conn: Optional[sqlite3.Connection] = None
         try:
-            # Connect in read-only mode to prevent write locks or interfering with active runs
-            try:
-                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            except Exception:
-                conn = sqlite3.connect(db_path)
+            # Connect read-only so we never lock, write, or (re)create a live DB.
+            # Percent-encode the path so '?', '#', '%' etc. stay literal in the
+            # SQLite URI; quote() keeps '/' intact for ordinary absolute paths.
+            # If the DB vanished or is locked, connect raises and the outer
+            # except converts it to the normal None outcome - no read-write
+            # fallback that could create or modify the file.
+            conn = sqlite3.connect(f"file:{quote(db_path)}?mode=ro", uri=True)
 
             cursor = conn.cursor()
 
