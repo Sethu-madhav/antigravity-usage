@@ -159,7 +159,7 @@ class WindowStats:
             return min(100.0, (self.estimated_cost / self.cost_limit_usd) * 100.0)
         if self.limit_tokens <= 0:
             return 100.0 if self.usage.total_tokens > 0 else 0.0
-        return (self.usage.total_tokens / self.limit_tokens) * 100.0
+        return min(100.0, (self.usage.total_tokens / self.limit_tokens) * 100.0)
 
     @property
     def pct_remaining(self) -> float:
@@ -176,6 +176,20 @@ class WindowStats:
     @property
     def tokens_remaining(self) -> int:
         """Tokens remaining before hitting limit."""
+        if self.limit_tokens <= 0 or self.is_exceeded:
+            return 0
+        if self.server_remaining_fraction is not None or (
+            self.cost_limit_usd is not None
+            and self.cost_limit_usd > 0
+            and self.estimated_cost > 0
+        ):
+            return max(
+                0,
+                min(
+                    self.limit_tokens,
+                    int(round(self.limit_tokens * (self.pct_remaining / 100.0))),
+                ),
+            )
         return max(0, self.limit_tokens - self.usage.total_tokens)
 
     @property
