@@ -359,7 +359,8 @@ def fetch_live_quota_summary(
     of the running Antigravity ``language_server`` process (if active), falling back
     to the last cached response on disk. A cache up to ~60s old is returned as is.
     An older one, up to ``_QUOTA_CACHE_MAX_AGE_SECONDS``, is returned with
-    ``"source": "cached"`` so callers never render it as live server data
+    ``"source": "cached"`` and its ``"age_seconds"`` (the same age the error note
+    reports) so callers never render it as live server data
     (BUG-005). Older caches, or caches with no buckets, are rejected.
 
     When ``errors`` is a list, a short reason is appended for each step that
@@ -502,6 +503,7 @@ def fetch_live_quota_summary(
                         and cached["buckets"]
                     ):
                         cached["source"] = "cached"
+                        cached["age_seconds"] = max(0.0, age.total_seconds())
                         return cached
         except Exception:
             pass
@@ -792,6 +794,7 @@ class LimitsCalculator:
         live_buckets = (live_data or {}).get("buckets", {}) if live_data else {}
         from_cache = bool(live_data) and live_data.get("source") == "cached"
         cache_fetched_at: Optional[datetime] = None
+        cache_age_seconds: Optional[float] = None
         if from_cache:
             # Only buckets whose cycle is still running say anything about now.
             running: Dict[str, Dict[str, Any]] = {}
@@ -804,6 +807,7 @@ class LimitsCalculator:
             live_buckets = running
             if live_buckets:
                 cache_fetched_at = _parse_fetched_at(live_data.get("fetched_at"))
+                cache_age_seconds = live_data.get("age_seconds")
             else:
                 live_errors.append("every cached quota cycle has since reset")
         has_server_buckets = bool(live_buckets)
@@ -947,11 +951,7 @@ class LimitsCalculator:
             live_error=live_error,
             quota_source=quota_source,
             cache_fetched_at=cache_fetched_at,
-            cache_age_seconds=(
-                max(0.0, (datetime.now(timezone.utc) - cache_fetched_at).total_seconds())
-                if cache_fetched_at is not None
-                else None
-            ),
+            cache_age_seconds=cache_age_seconds,
         )
 
 

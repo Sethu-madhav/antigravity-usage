@@ -112,6 +112,7 @@ class TestCachedReadingIsUsed(_CacheTestCase):
         out = _capture(cmd_limits, [], _limits_args())
 
         self.assertIn("Last server reading, 8 min ago (Antigravity server not reachable now)", out)
+        self.assertIn("cached server reading is 8 min old", out)
         self.assertNotIn("Live Antigravity Server", out)
         self.assertNotIn("Local estimate, this device only", out)
         self.assertIn("35%", out)
@@ -142,6 +143,23 @@ class TestCachedReadingIsUsed(_CacheTestCase):
         self.assertIn("5h: 35%", out)
         self.assertEqual(payload["weekly_pct"], 35)
         self.assertNotEqual(payload["status"], "unknown")
+
+
+    def test_age_measured_by_the_fetch_is_reused(self):
+        # The header and the "N min old" reason must come from one measurement,
+        # or they disagree when the age crosses a minute between the two.
+        now_utc = datetime.now(timezone.utc)
+        reset = (now_utc + timedelta(hours=3)).isoformat()
+        cached = {
+            "source": "cached",
+            "fetched_at": (now_utc - timedelta(minutes=30)).isoformat(),
+            "age_seconds": 539.9,
+            "buckets": {"gemini-weekly": {"bucketId": "gemini-weekly", "remainingFraction": 0.5, "resetTime": reset}},
+        }
+        with mock.patch.object(limits, "fetch_live_quota_summary", return_value=cached):
+            pools = LimitsCalculator.compute_all_pools([], use_live_server=True)
+
+        self.assertEqual(pools.cache_age_seconds, 539.9)
 
 
 class TestCachedReadingIsRejected(_CacheTestCase):
