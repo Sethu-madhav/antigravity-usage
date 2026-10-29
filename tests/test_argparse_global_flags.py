@@ -28,6 +28,8 @@ class TestArgparseGlobalFlags(unittest.TestCase):
     def test_flags_before_subcommand_survive(self):
         # BUG-002: subparser defaults must not clobber root-level values.
         self.assertTrue(self._parse(["--json", "limits"]).json)
+        self.assertTrue(self._parse(["--csv", "limits"]).csv)
+        self.assertTrue(self._parse(["--json", "statusline"]).json)
         self.assertTrue(self._parse(["--csv", "statusline"]).csv)
 
     def test_data_source_flags_both_positions(self):
