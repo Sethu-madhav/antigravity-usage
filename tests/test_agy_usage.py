@@ -1976,8 +1976,6 @@ class TestGenMetadataModelAttribution(unittest.TestCase):
         self.assertEqual(normalize_model_name("gpt-oss-120b"), "gpt-oss-120b")
 
 
-
-
 class TestBug013TokensRemainingAndPctClamping(unittest.TestCase):
     """Regression tests for BUG-013: tokens_remaining must derive from remaining
 
@@ -2122,6 +2120,52 @@ class TestBug013TokensRemainingAndPctClamping(unittest.TestCase):
         self.assertEqual(w.pct_remaining, 0.0)
         self.assertTrue(w.is_exceeded)
         self.assertEqual(w.tokens_remaining, 0)
+
+
+    def test_token_model_partial_usage(self):
+        # Pure token model with partial usage must retain exact integer difference.
+        from datetime import datetime
+        from agy_usage.limits import WindowStats
+        from agy_usage.models import TokenUsage
+
+        now = datetime.now()
+        w = WindowStats(
+            window_name="gemini-5h",
+            start_time=now,
+            end_time=now,
+            usage=TokenUsage(prompt_tokens=400_000),
+            step_count=1,
+            session_count=1,
+            limit_tokens=1_000_000,
+            estimated_cost=0.0,
+        )
+        self.assertEqual(w.pct_used, 40.0)
+        self.assertEqual(w.pct_remaining, 60.0)
+        self.assertFalse(w.is_exceeded)
+        self.assertEqual(w.tokens_remaining, 600_000)
+
+    def test_cost_limit_with_zero_estimated_cost_falls_through_to_tokens(self):
+        # When cost_limit_usd is set but estimated_cost is 0.0, token usage drives calculation.
+        from datetime import datetime
+        from agy_usage.limits import WindowStats
+        from agy_usage.models import TokenUsage
+
+        now = datetime.now()
+        w = WindowStats(
+            window_name="claude-5h",
+            start_time=now,
+            end_time=now,
+            usage=TokenUsage(prompt_tokens=300_000),
+            step_count=1,
+            session_count=1,
+            limit_tokens=1_000_000,
+            estimated_cost=0.0,
+            cost_limit_usd=20.0,
+        )
+        self.assertEqual(w.pct_used, 30.0)
+        self.assertEqual(w.pct_remaining, 70.0)
+        self.assertFalse(w.is_exceeded)
+        self.assertEqual(w.tokens_remaining, 700_000)
 
 
 if __name__ == "__main__":
