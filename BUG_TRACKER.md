@@ -14,7 +14,7 @@
 
 | Ledger | File | Items | Open | High | Med | Low |
 |--------|------|------:|-----:|-----:|----:|----:|
-| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 24 | 20 | 1 | 10 | 9 |
+| 🐛 Bugs (this file) | `BUG_TRACKER.md` | 25 | 19 | 0 | 9 | 10 |
 | ⚡ Optimizations | [optimizations.md](optimizations.md) | 8 | 8 | 1 | 3 | 4 |
 | 🔧 Improvements | [improvements.md](improvements.md) | 9 | 9 | 0 | 3 | 6 |
 | ✨ Features | [features.md](features.md) | 10 | 10 | n/a | n/a | n/a |
@@ -22,6 +22,9 @@
 > **Progress:** BUG-001 and BUG-002 fixed by PR #1 (merged, commit `44ecdc2`, merge of
 > `8b95649`, 2026-10-29); BUG-024 was created from its post-merge review.
 > BUG-003 fixed by PR #2 (2026-10-29). BUG-004 fixed by PR #3 (2026-10-29).
+> BUG-006 fixed by PR #4 (stacked on #3; merge `5f1f4b8`, 2026-10-29); BUG-025 was created from its
+> post-merge DeepSeek V4.1 Flash review. BUG-005 fixed by PR #6 (merge `76dbad0`, 2026-10-29).
+> BUG-007 fix open as PR #5.
 
 ---
 
@@ -33,8 +36,8 @@
 | BUG-002 | 🔴 | A | ✅ | `cli.py:265-269, 319-323` | Root `--json/--csv` silently discarded before `limits`/`statusline` (parse-level clobber fixed; statusline `--csv` split out as BUG-024) |
 | BUG-003 | 🔴 | A | ✅ | `limits.py:210-236` | `parse_token_amount` crashes on `inf`, accepts negatives |
 | BUG-004 | 🔴 | A | ✅ | `cli.py` + `heatmap.py` + `display.py` | `--no-color` does not disable heatmap colors |
-| BUG-005 | 🔴 | B | ⬜ | `limits.py:375-382, 644-649` | Stale quota cache served as authoritative "Live" data (no TTL) |
-| BUG-006 | 🟠 | A | ⬜ | `heatmap.py:178-189` | Month labels drift right, point at wrong weeks (dead `chars_consumed`) |
+| BUG-005 | 🔴 | B | ✅ | `limits.py:375-382, 644-649` | Stale quota cache served as authoritative "Live" data (no TTL) |
+| BUG-006 | 🟠 | A | ✅ | `heatmap.py:178-189` | Month labels drift right, point at wrong weeks (dead `chars_consumed`) |
 | BUG-007 | 🟠 | B | ⬜ | `parser.py:266-269` | Unquoted SQLite URI + silent read-write fallback |
 | BUG-008 | 🟠 | B | ⬜ | `parser.py:549-551` | One exception kills whole session parse (flickering in `live`) |
 | BUG-009 | 🟠 | B | ⬜ | `display.py:48-53, heatmap.py:42-44` | Colors leak into piped output when `COLORTERM` set |
@@ -53,6 +56,7 @@
 | BUG-022 | 🟡 | B | ⬜ | `parser.py:240` | `--dir` path skips chronological re-sort (mtime vs start_time) |
 | BUG-023 | 🟠 | B | ⬜ | `setup.py` + `pyproject.toml` + `__init__.py` | Triplicated metadata/entry-point; no LICENSE file |
 | BUG-024 | 🟠 | A | ⬜ | `cli.py:1222` (`cmd_statusline`) | `statusline --csv` accepted but ignored: prints one-line text, exit 0 (found post-merge by Deepseek review of PR #1; cmd_statusline only reads `args.json`) |
+| BUG-025 | 🟡 | A | ⬜ | `heatmap.py:176-198` | Adjacent first-month labels: middle month's label dropped (w0's 2-col span skips w1) — found post-merge by DeepSeek V4.1 Flash review of PR #4 |
 
 ### Details
 
@@ -98,11 +102,23 @@ server is down; `fetched_at` is stored but never validated → hours-old `remain
 renders under "Live Antigravity Server", and past-`resetTime` fractions get grafted onto
 freshly computed windows. **Fix:** reject cache older than ~60 s; only use
 `remaining_fraction` when `reset_dt > now`.
+**Fix (shipped):** `fetch_live_quota_summary` now rejects the cached payload when
+`fetched_at` is older than ~60 s (parsed with `datetime.fromisoformat`, naive stamps
+treated as UTC), each bucket's `remaining_fraction` is honored only while its
+`resetTime` is still in the future, and a stale or invalid cache returns `None` so
+`live_synced` goes false instead of rendering hours-old fractions under "Live
+Antigravity Server". Tests: fresh/ expired/ already-reset-bucket coverage without
+network. ✅ fixed by PR #6 (merge `76dbad0`).
 
 **BUG-006 · Heatmap month labels drift · 🟠 A**
 Each week column is 2 chars, but a 3-char label advances `col_idx` by only 1 — drift grows
 to +11 chars at 52 weeks. Dead variable `chars_consumed = 2` (line 185).
 **Fix:** `cols_skip = max(1, -(-len(name) // 2))`; `ljust(cols_skip * 2)`; `col_idx += cols_skip`.
+**Fix (shipped):** labels now advance the cursor by their true 2-char-column footprint and
+pad to exactly that width; dead `chars_consumed` deleted. Stacked PR #4 merged after PR #3
+(`5f1f4b8`, 2026-10-29). Reviewed post-merge by DeepSeek V4.1 Flash: APPROVE WITH NITS
+(1,413-window fuzz, zero geometry failures besides adjacent-first-labels, 40/40 tests);
+the one real edge case is logged as BUG-025.
 
 **BUG-007 · SQLite URI quoting + RW fallback · 🟠 B**
 `f"file:{db_path}?mode=ro"`: paths containing `?`/`#`/`%` corrupt the URI; the bare
@@ -205,6 +221,18 @@ the `live --json` gap is BUG-019).
 does, or reject the flag (`error: --csv is not supported by 'statusline'` to stderr,
 exit 2) and drop `--csv` from statusline's help. Also drop or replace the vacuous
 `--csv statusline` parse assertion with a behavioral test on `main()`.
+
+**BUG-025 · Adjacent first-month labels: middle month dropped · 🟡 A** ⬜
+Found post-merge by the DeepSeek V4.1 Flash review of PR #4 (BUG-006 fix). When the
+window's first Monday is the last Monday of a month, w0/w1 are both month starts; w0's
+label spans 2 columns, so the loop crosses w1's label slot and never prints it — the
+middle month vanishes (`weeks=26, end=2026-01-19` renders `Jul … Sep` missing `Aug`;
+1,413-window fuzz hit ~23% of 365 sampled end dates, first two columns only). Pre-fix
+output overlapped labels (`JulAug`) instead.
+**Fix idea:** when both `month_positions[0]` and `[1]` exist, drop the leading
+partial-month (mostly-offscreen) label or compact the pair; pin with a regression test
+alongside BUG-006's pinned layout test. Related cleanup candidate: dead
+`month_line_chars` (`heatmap.py:173`).
 
 ---
 
