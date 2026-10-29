@@ -304,12 +304,12 @@ class AntigravityParser:
                 source_label = "ide"
             elif "antigravity" in custom_dir:
                 source_label = "cli"
-            return cls.scan_directory(custom_dir, source=source_label)
+            all_sessions = cls.scan_directory(custom_dir, source=source_label)
+        else:
+            for d_path, s_label in cls.get_default_directories(mode=source_mode):
+                all_sessions.extend(cls.scan_directory(d_path, source=s_label))
 
-        for d_path, s_label in cls.get_default_directories(mode=source_mode):
-            all_sessions.extend(cls.scan_directory(d_path, source=s_label))
-
-        all_sessions = cls._dedupe_by_session_id(all_sessions)
+            all_sessions = cls._dedupe_by_session_id(all_sessions)
 
         # Sort all sessions descending by start_time (or file mtime if start_time is missing)
         all_sessions.sort(
