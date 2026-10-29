@@ -1310,8 +1310,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
 
     if args.no_color:
-        # Disable ANSI
-        Colors.enabled = classmethod(lambda cls: False)
+        # Disable ANSI globally via the shared switch consulted by both
+        # display.Colors and heatmap.HeatmapColor (BUG-004 fix).
+        Colors.set_override(False)
 
     sessions = get_sessions(args)
     sub = args.subcommand
