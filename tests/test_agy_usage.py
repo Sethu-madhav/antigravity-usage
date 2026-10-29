@@ -313,6 +313,33 @@ class TestHeatmapAndDisplay(unittest.TestCase):
         self.assertEqual(format_duration_verbose(3660), "1 hour, 1 minute")
         self.assertEqual(format_duration_verbose(0), "0 minutes")
 
+    def test_format_percent_remaining_semantics_unchanged(self):
+        # BUG-011 regression guard: *remaining* callers keep today's thresholds
+        # (green >=75, yellow >=40, gray below) — default and explicit kwarg.
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+        self.assertEqual(format_percent(92.0), Colors.green("92.0%"))
+        self.assertEqual(format_percent(100.0), Colors.green("100.0%"))
+        self.assertEqual(format_percent(75.0), Colors.green("75.0%"))
+        self.assertEqual(format_percent(74.9), Colors.yellow("74.9%"))
+        self.assertEqual(format_percent(40.0), Colors.yellow("40.0%"))
+        self.assertEqual(format_percent(39.9), Colors.gray("39.9%"))
+        self.assertEqual(format_percent(92.0, high_is_good=True), Colors.green("92.0%"))
+
+    def test_format_percent_used_semantics_inverted(self):
+        # BUG-011: for *used* quota a high fraction is bad (warn/danger color),
+        # and a low fraction is healthy (green) — the inverse reading.
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+        self.assertEqual(format_percent(92.0, high_is_good=False), Colors.red("92.0%"))
+        self.assertEqual(format_percent(100.0, high_is_good=False), Colors.red("100.0%"))
+        self.assertEqual(format_percent(75.0, high_is_good=False), Colors.red("75.0%"))
+        self.assertEqual(format_percent(74.9, high_is_good=False), Colors.yellow("74.9%"))
+        self.assertEqual(format_percent(40.0, high_is_good=False), Colors.yellow("40.0%"))
+        self.assertEqual(format_percent(39.9, high_is_good=False), Colors.green("39.9%"))
+        self.assertEqual(format_percent(30.0, high_is_good=False), Colors.green("30.0%"))
+        # The bug itself: 92.0% used must render a warn/danger color, never green.
+
     def test_sparkline(self):
         spark = render_sparkline([10, 20, 50, 80, 100])
         self.assertEqual(len(spark), 5)
@@ -770,6 +797,72 @@ class TestLimits(unittest.TestCase):
         csv_out = buf_csv.getvalue()
         self.assertIn("5-Hour Sprint", csv_out)
         self.assertIn("Weekly Cap", csv_out)
+
+    def test_cmd_limits_used_percent_uses_inverted_semantics(self):
+        """BUG-011: in the limits gauge rows, '(x.x% used)' must color high usage
+        warn/danger instead of green, while the '(x.x% exact' remaining fragment
+        keeps the unchanged thresholds."""
+        import argparse
+        import io
+        import re
+        import sys
+        from agy_usage.cli import cmd_limits
+
+        Colors.set_override(True)
+        self.addCleanup(Colors.set_override, None)
+
+        t = datetime.now()
+        # 81M tokens against the pro-tier 100M 5h / 750M weekly Gemini caps:
+        # the 5h window sits at 81.0% used (previously rendered green — the bug),
+        # the weekly window at 10.8% used (healthy green under inverted semantics).
+        session = SessionSummary(
+            session_id="s-usage-bug011",
+            source="cli",
+            file_path="/tmp/bug011-nonexistent.db",
+            title="BUG-011 Used Percent Color",
+            workspace="ws",
+            models=["gemini-3.8-flash"],
+            start_time=t,
+            end_time=t,
+            step_count=1,
+            usage=TokenUsage(prompt_tokens=80_000_000, cached_tokens=0, output_tokens=1_000_000),
+            steps=[StepRecord(step_idx=1, timestamp=t, model="gemini-3.8-flash", usage=TokenUsage(prompt_tokens=80_000_000, cached_tokens=0, output_tokens=1_000_000))],
+        )
+        args = argparse.Namespace(tier="pro", five_h_limit=None, weekly_limit=None, json=False, csv=False)
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            cmd_limits([session], args)
+        finally:
+            sys.stdout = old_stdout
+
+        out = buf.getvalue()
+        gauge_lines = [ln for ln in out.splitlines() if "exact |" in ln]
+        self.assertEqual(len(gauge_lines), 5)  # gemini weekly/5h, claude weekly/5h, argon weekly
+
+        any_high_used_seen = False
+        for ln in gauge_lines:
+            plain = strip_ansi(ln)
+            rem_val = float(re.search(r"\((\d+\.\d)% exact", plain).group(1))
+            used_val = float(re.search(r"\| (\d+\.\d)% used\)", plain).group(1))
+            self.assertAlmostEqual(rem_val + used_val, 100.0, delta=0.1)
+            # The used fragment must match the inverted path, wrapped before " used)".
+            used_fragment = format_percent(used_val, high_is_good=False) + " used)"
+            self.assertIn(used_fragment, ln)
+            if used_val >= 75.0:
+                any_high_used_seen = True
+                self.assertNotIn(Colors.green(f"{used_val:.1f}%"), ln)
+        self.assertTrue(any_high_used_seen)
+
+        # High usage: Gemini 5h at 81.0% used renders red (was green before the fix).
+        self.assertTrue(any(Colors.red("81.0%") in ln for ln in gauge_lines))
+        self.assertFalse(any(Colors.green("81.0%") in ln for ln in gauge_lines))
+        # Low usage: Gemini weekly at 10.8% used stays green (healthy).
+        self.assertTrue(any(Colors.green("10.8%") + " used)" in ln for ln in gauge_lines))
+        # Remaining fragments are unchanged: weekly 89.2% green, 5h 19.0% gray.
+        self.assertTrue(any(Colors.green("89.2%") + " exact |" in ln for ln in gauge_lines))
+        self.assertTrue(any(Colors.gray("19.0%") + " exact |" in ln for ln in gauge_lines))
 
     def test_cmd_statusline_formatting_and_exports(self):
         import argparse
