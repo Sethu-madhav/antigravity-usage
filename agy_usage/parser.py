@@ -211,6 +211,48 @@ def _mtime_or_zero(path: str) -> float:
         return 0.0
 
 
+def _fill_missing_step_timestamps(
+    timestamps: List[Optional[datetime]],
+    fallback: Optional[datetime] = None,
+) -> List[Optional[datetime]]:
+    """Fill missing step timestamps using neighbour inference (BUG-018).
+
+    For each missing timestamp in the idx-ordered sequence:
+    1. Fill with the timestamp of the nearest PRECEDING timestamped step.
+    2. If there is no preceding timestamped step, fill with the nearest FOLLOWING
+       timestamped step.
+    3. If the session has no timestamped steps at all, fill with fallback
+       (start_time_blob if set, else min(db_mtime, datetime.now()) if available).
+    4. If fallback is None, missing timestamps remain None (caller drops the steps).
+    """
+    if not timestamps:
+        return []
+
+    # If no timestamped steps exist at all, use the session fallback
+    if not any(ts is not None for ts in timestamps):
+        return [fallback for _ in timestamps]
+
+    n = len(timestamps)
+    result = list(timestamps)
+    last_seen: Optional[datetime] = None
+
+    for i in range(n):
+        if result[i] is not None:
+            last_seen = result[i]
+        else:
+            if last_seen is not None:
+                # Nearest PRECEDING timestamped step
+                result[i] = last_seen
+            else:
+                # No preceding timestamped step; search forward for nearest FOLLOWING
+                for j in range(i + 1, n):
+                    if timestamps[j] is not None:
+                        result[i] = timestamps[j]
+                        break
+
+    return result
+
+
 class AntigravityParser:
     """Parser to discover and extract Antigravity conversation databases."""
 
@@ -571,6 +613,9 @@ class AntigravityParser:
             except (OSError, OverflowError, ValueError):
                 db_mtime = None
 
+            # BUG-018: Collect raw steps without immediately falling back to db_mtime
+            raw_steps: List[Tuple[int, Optional[datetime], str, TokenUsage]] = []
+
             for idx, meta_blob in step_rows:
                 try:
                     if not meta_blob:
@@ -600,17 +645,6 @@ class AntigravityParser:
                                 step_ts = ts
                                 break
 
-                    if not step_ts:
-                        # Fallback to DB file modification time
-                        step_ts = db_mtime
-                    if not step_ts:
-                        continue
-
-                    if first_ts is None or step_ts < first_ts:
-                        first_ts = step_ts
-                    if last_ts is None or step_ts > last_ts:
-                        last_ts = step_ts
-
                     # Identify Model for this step:
                     # 1) Direct gen_metadata last_step_index anchor
                     # 2) UsageMetadata field 1 model_enum integer
@@ -629,22 +663,51 @@ class AntigravityParser:
                     if not step_model:
                         step_model = default_model
 
-                    known_models.add(step_model)
-                    model_token_totals[step_model] = (
-                        model_token_totals.get(step_model, 0) + step_usage.total_tokens
-                    )
-
-                    step_rec = StepRecord(
-                        step_idx=idx,
-                        timestamp=step_ts,
-                        model=step_model,
-                        usage=step_usage,
-                    )
-                    steps.append(step_rec)
-                    aggregated_usage = aggregated_usage.add(step_usage)
+                    # BUG-018: Record step candidate without immediate db_mtime fallback;
+                    # missing timestamps will be filled via neighbour inference below.
+                    raw_steps.append((idx, step_ts, step_model, step_usage))
                 except Exception:
                     # One malformed row must not discard the rest of the session
                     continue
+
+            # BUG-018: Fill missing timestamps using nearest neighbour inference.
+            # If no steps have timestamps, fall back to start_time_blob, or min(db_mtime, now).
+            session_fallback: Optional[datetime] = None
+            if start_time_blob is not None:
+                session_fallback = start_time_blob
+            elif db_mtime is not None:
+                session_fallback = min(db_mtime, datetime.now())
+
+            raw_timestamps = [ts for _, ts, _, _ in raw_steps]
+            filled_timestamps = _fill_missing_step_timestamps(
+                raw_timestamps, fallback=session_fallback
+            )
+
+            for (idx, _, step_model, step_usage), final_ts in zip(
+                raw_steps, filled_timestamps
+            ):
+                if final_ts is None:
+                    # No timestamp could be inferred; drop the step
+                    continue
+
+                if first_ts is None or final_ts < first_ts:
+                    first_ts = final_ts
+                if last_ts is None or final_ts > last_ts:
+                    last_ts = final_ts
+
+                known_models.add(step_model)
+                model_token_totals[step_model] = (
+                    model_token_totals.get(step_model, 0) + step_usage.total_tokens
+                )
+
+                step_rec = StepRecord(
+                    step_idx=idx,
+                    timestamp=final_ts,
+                    model=step_model,
+                    usage=step_usage,
+                )
+                steps.append(step_rec)
+                aggregated_usage = aggregated_usage.add(step_usage)
 
             return build_summary()
 
