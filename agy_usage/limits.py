@@ -9,7 +9,7 @@ import subprocess
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from agy_usage.display import (
     Colors,
@@ -353,15 +353,28 @@ def calibrate_limit_from_remaining(
     return int(round(used_tokens / (used_pct / 100.0)))
 
 
-def _parse_utc_iso_to_local_naive(iso_str: Optional[str]) -> Optional[datetime]:
-    """Parse an ISO-8601 UTC timestamp (e.g. '2026-10-25T00:21:51Z') into local naive datetime."""
+def _parse_iso(iso_str: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 stamp (``Z`` means UTC) into a datetime, aware or naive.
+
+    Returns None for falsy or unparseable input.
+    """
     if not iso_str:
         return None
     try:
         s = iso_str.strip()
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
-        dt_utc = datetime.fromisoformat(s)
+        return datetime.fromisoformat(s)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _parse_utc_iso_to_local_naive(iso_str: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 UTC timestamp (e.g. '2026-10-25T00:21:51Z') into local naive datetime."""
+    dt_utc = _parse_iso(iso_str)
+    if dt_utc is None:
+        return None
+    try:
         if dt_utc.tzinfo is not None:
             return dt_utc.astimezone().replace(tzinfo=None)
         return dt_utc
@@ -375,14 +388,8 @@ def _parse_fetched_at(iso_str: Optional[str]) -> Optional[datetime]:
     Naive stamps are treated as UTC. Returns None for missing or unparseable
     stamps so the caller rejects the cache (BUG-005).
     """
-    if not iso_str:
-        return None
-    try:
-        s = iso_str.strip()
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        dt_utc = datetime.fromisoformat(s)
-    except (AttributeError, TypeError, ValueError):
+    dt_utc = _parse_iso(iso_str)
+    if dt_utc is None:
         return None
     if dt_utc.tzinfo is None:
         return dt_utc.replace(tzinfo=timezone.utc)
@@ -403,6 +410,140 @@ _QUOTA_CACHE_TTL_SECONDS = 60.0
 # it is returned tagged ``"source": "cached"`` and shown with its age, never as
 # live. Buckets whose resetTime has passed are still dropped downstream.
 _QUOTA_CACHE_MAX_AGE_SECONDS = 6 * 3600.0
+
+
+_CSRF_RE = re.compile(r"--csrf_token\s+([^\s]+)")
+_LISTEN_PORT_RE = re.compile(r"127\.0\.0\.1:(\d+)\s+\(LISTEN\)")
+
+
+def _find_language_servers(note: Callable[[str], None]) -> Tuple[bool, List[Tuple[str, str]]]:
+    """List running Antigravity language_servers as ``(pid, csrf_token)``.
+
+    Returns ``(ps_ok, servers)``; ``ps_ok`` is False when ``ps`` itself failed.
+    """
+    ps_ok = True
+    try:
+        ps_out = subprocess.check_output(
+            ["ps", "-axo", "pid=,command="],
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+        ).decode("utf-8", errors="ignore")
+    except Exception as exc:
+        ps_out = ""
+        ps_ok = False
+        note(f"could not list processes ({exc.__class__.__name__})")
+
+    servers: List[Tuple[str, str]] = []
+    for line in ps_out.splitlines():
+        if "language_server" not in line or "--csrf_token" not in line:
+            continue
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid, cmd = parts[0], parts[1]
+        m_csrf = _CSRF_RE.search(cmd)
+        if not m_csrf:
+            continue
+        servers.append((pid, m_csrf.group(1)))
+    return ps_ok, servers
+
+
+def _listening_ports(pid: str, note: Callable[[str], None]) -> Optional[List[int]]:
+    """Return the 127.0.0.1 TCP ports ``pid`` listens on, or None when ``lsof`` fails."""
+    try:
+        lsof_out = subprocess.check_output(
+            ["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN"],
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+        ).decode("utf-8", errors="ignore")
+    except Exception as exc:
+        note(f"could not list ports of language_server pid {pid} ({exc.__class__.__name__})")
+        return None
+
+    ports: List[int] = []
+    for lline in lsof_out.splitlines():
+        m_port = _LISTEN_PORT_RE.search(lline)
+        if m_port:
+            ports.append(int(m_port.group(1)))
+    if not ports:
+        note(f"language_server pid {pid} is not listening on 127.0.0.1")
+    return ports
+
+
+def _post_connect(base_url: str, method: str, headers: Dict[str, str], timeout: float) -> Any:
+    """POST ``{}`` to a Connect RPC ``method`` and return the decoded JSON body."""
+    req = urllib.request.Request(
+        f"{base_url}/{method}",
+        data=b"{}",
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _extract_buckets(quota_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Flatten a ``RetrieveUserQuotaSummary`` response into ``{bucketId: bucket}``."""
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for grp in quota_data["response"].get("groups", []):
+        for b in grp.get("buckets", []):
+            bid = b.get("bucketId")
+            if bid:
+                buckets[bid] = {
+                    "bucketId": bid,
+                    "displayName": b.get("displayName", ""),
+                    "description": b.get("description", ""),
+                    "window": b.get("window", ""),
+                    "remainingFraction": float(b.get("remainingFraction", 0.0)),
+                    "resetTime": b.get("resetTime"),
+                }
+    return buckets
+
+
+def _fetch_user_tier(base_url: str, headers: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+    """Best-effort ``GetUserStatus`` lookup of the account's ``(tier id, tier name)``."""
+    try:
+        u_data = _post_connect(base_url, "GetUserStatus", headers, 1.0)
+        ut = u_data.get("userStatus", {}).get("userTier", {})
+        return ut.get("id"), ut.get("name")
+    except Exception:
+        return None, None
+
+
+def _write_quota_cache(result: Dict[str, Any]) -> None:
+    """Persist a live reading to ``_QUOTA_CACHE_PATH``; a cache failure never breaks a fetch."""
+    try:
+        os.makedirs(os.path.dirname(_QUOTA_CACHE_PATH), exist_ok=True)
+        with open(_QUOTA_CACHE_PATH, "w", encoding="utf-8") as fp:
+            json.dump(result, fp, indent=2)
+    except Exception:
+        pass
+
+
+def _read_quota_cache(note: Callable[[str], None]) -> Optional[Dict[str, Any]]:
+    """Return the on-disk quota cache if it is fresh, or aged but still usable (BUG-005)."""
+    if os.path.isfile(_QUOTA_CACHE_PATH):
+        try:
+            with open(_QUOTA_CACHE_PATH, "r", encoding="utf-8") as fp:
+                cached = json.load(fp)
+            if isinstance(cached, dict) and "buckets" in cached:
+                fetched_at = _parse_fetched_at(cached.get("fetched_at"))
+                if fetched_at is not None:
+                    age = datetime.now(timezone.utc) - fetched_at
+                    if age <= timedelta(seconds=_QUOTA_CACHE_TTL_SECONDS):
+                        return cached
+                    note(f"cached server reading is {int(age.total_seconds() // 60)} min old")
+                    if (
+                        age <= timedelta(seconds=_QUOTA_CACHE_MAX_AGE_SECONDS)
+                        and isinstance(cached["buckets"], dict)
+                        and cached["buckets"]
+                    ):
+                        cached["source"] = "cached"
+                        cached["age_seconds"] = max(0.0, age.total_seconds())
+                        return cached
+        except Exception:
+            pass
+    return None
 
 
 def fetch_live_quota_summary(
@@ -426,49 +567,11 @@ def fetch_live_quota_summary(
         if errors is not None:
             errors.append(reason)
 
-    ps_ok = True
-    try:
-        ps_out = subprocess.check_output(
-            ["ps", "-axo", "pid=,command="],
-            stderr=subprocess.DEVNULL,
-            timeout=1.5,
-        ).decode("utf-8", errors="ignore")
-    except Exception as exc:
-        ps_out = ""
-        ps_ok = False
-        _note(f"could not list processes ({exc.__class__.__name__})")
-
-    found_server = False
-    for line in ps_out.splitlines():
-        if "language_server" not in line or "--csrf_token" not in line:
+    ps_ok, servers = _find_language_servers(_note)
+    for pid, csrf in servers:
+        ports = _listening_ports(pid, _note)
+        if ports is None:
             continue
-        parts = line.strip().split(None, 1)
-        if len(parts) < 2:
-            continue
-        pid, cmd = parts[0], parts[1]
-        m_csrf = re.search(r"--csrf_token\s+([^\s]+)", cmd)
-        if not m_csrf:
-            continue
-        csrf = m_csrf.group(1)
-        found_server = True
-
-        try:
-            lsof_out = subprocess.check_output(
-                ["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN"],
-                stderr=subprocess.DEVNULL,
-                timeout=1.5,
-            ).decode("utf-8", errors="ignore")
-        except Exception as exc:
-            _note(f"could not list ports of language_server pid {pid} ({exc.__class__.__name__})")
-            continue
-
-        ports: List[int] = []
-        for lline in lsof_out.splitlines():
-            m_port = re.search(r"127\.0\.0\.1:(\d+)\s+\(LISTEN\)", lline)
-            if m_port:
-                ports.append(int(m_port.group(1)))
-        if not ports:
-            _note(f"language_server pid {pid} is not listening on 127.0.0.1")
 
         for port in sorted(ports):
             base_url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService"
@@ -478,91 +581,29 @@ def fetch_live_quota_summary(
                 "x-codeium-csrf-token": csrf,
             }
             try:
-                req = urllib.request.Request(
-                    f"{base_url}/RetrieveUserQuotaSummary",
-                    data=b"{}",
-                    headers=headers,
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=1.2) as resp:
-                    quota_data = json.loads(resp.read().decode("utf-8"))
+                quota_data = _post_connect(base_url, "RetrieveUserQuotaSummary", headers, 1.2)
                 if "response" not in quota_data or "groups" not in quota_data["response"]:
                     _note(f"port {port}: response has no quota groups")
                     continue
 
-                buckets: Dict[str, Dict[str, Any]] = {}
-                for grp in quota_data["response"].get("groups", []):
-                    for b in grp.get("buckets", []):
-                        bid = b.get("bucketId")
-                        if bid:
-                            buckets[bid] = {
-                                "bucketId": bid,
-                                "displayName": b.get("displayName", ""),
-                                "description": b.get("description", ""),
-                                "window": b.get("window", ""),
-                                "remainingFraction": float(b.get("remainingFraction", 0.0)),
-                                "resetTime": b.get("resetTime"),
-                            }
-
-                user_tier_id = None
-                user_tier_name = None
-                try:
-                    req_u = urllib.request.Request(
-                        f"{base_url}/GetUserStatus",
-                        data=b"{}",
-                        headers=headers,
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req_u, timeout=1.0) as resp_u:
-                        u_data = json.loads(resp_u.read().decode("utf-8"))
-                        ut = u_data.get("userStatus", {}).get("userTier", {})
-                        user_tier_id = ut.get("id")
-                        user_tier_name = ut.get("name")
-                except Exception:
-                    pass
-
+                buckets = _extract_buckets(quota_data)
+                user_tier_id, user_tier_name = _fetch_user_tier(base_url, headers)
                 result = {
                     "fetched_at": datetime.now(timezone.utc).isoformat(),
                     "user_tier_id": user_tier_id,
                     "user_tier_name": user_tier_name,
                     "buckets": buckets,
                 }
-                try:
-                    os.makedirs(os.path.dirname(_QUOTA_CACHE_PATH), exist_ok=True)
-                    with open(_QUOTA_CACHE_PATH, "w", encoding="utf-8") as fp:
-                        json.dump(result, fp, indent=2)
-                except Exception:
-                    pass
+                _write_quota_cache(result)
                 return result
             except Exception as exc:
                 _note(f"port {port}: {str(exc)[:80] or exc.__class__.__name__}")
                 continue
 
-    if ps_ok and not found_server:
+    if ps_ok and not servers:
         _note("no running Antigravity language_server found")
 
-    if use_cache and os.path.isfile(_QUOTA_CACHE_PATH):
-        try:
-            with open(_QUOTA_CACHE_PATH, "r", encoding="utf-8") as fp:
-                cached = json.load(fp)
-            if isinstance(cached, dict) and "buckets" in cached:
-                fetched_at = _parse_fetched_at(cached.get("fetched_at"))
-                if fetched_at is not None:
-                    age = datetime.now(timezone.utc) - fetched_at
-                    if age <= timedelta(seconds=_QUOTA_CACHE_TTL_SECONDS):
-                        return cached
-                    _note(f"cached server reading is {int(age.total_seconds() // 60)} min old")
-                    if (
-                        age <= timedelta(seconds=_QUOTA_CACHE_MAX_AGE_SECONDS)
-                        and isinstance(cached["buckets"], dict)
-                        and cached["buckets"]
-                    ):
-                        cached["source"] = "cached"
-                        cached["age_seconds"] = max(0.0, age.total_seconds())
-                        return cached
-        except Exception:
-            pass
-    return None
+    return _read_quota_cache(_note) if use_cache else None
 
 
 def should_use_live_server(sessions: List[SessionSummary]) -> bool:
