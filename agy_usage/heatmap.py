@@ -8,7 +8,7 @@ import sys
 from datetime import date, timedelta
 from typing import Callable, Dict, List, Optional, Tuple
 
-from agy_usage.display import Colors
+from agy_usage.display import Colors, is_color_enabled, supports_truecolor
 from agy_usage.models import DailyUsage, TokenUsage
 
 
@@ -41,7 +41,7 @@ class HeatmapColor:
     @classmethod
     def supports_color(cls) -> bool:
         """Check if ANSI colors are enabled (honors the global --no-color override, BUG-004)."""
-        return Colors.enabled()
+        return is_color_enabled()
 
     @classmethod
     def wrap(cls, text: str, code: str) -> str:
@@ -51,9 +51,7 @@ class HeatmapColor:
     @classmethod
     def supports_truecolor(cls) -> bool:
         """Check if terminal supports 24-bit TrueColor."""
-        colorterm = os.environ.get("COLORTERM", "")
-        term = os.environ.get("TERM", "")
-        return "truecolor" in colorterm or "24bit" in colorterm or "xterm-256color" in term or sys.platform == "darwin"
+        return supports_truecolor()
 
     @classmethod
     def cell(cls, level: int, char: str = "■") -> str:
