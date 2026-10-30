@@ -3,7 +3,6 @@
 import unittest
 
 from agy_usage.display import Colors, render_table, strip_ansi
-from agy_usage.heatmap import HeatmapColor
 
 
 class TestNestedColors(unittest.TestCase):
@@ -45,11 +44,11 @@ class TestNestedColors(unittest.TestCase):
         self.assertEqual(out, "a / b")
         self.assertNotIn("\033", out)
 
-    def test_heatmap_wrap_matches_colors_color(self):
-        inner = HeatmapColor.wrap("x", HeatmapColor.CYAN)
+    def test_heatmap_cyan_in_bold_single_reset(self):
+        inner = Colors.color("x", Colors.CYAN)
         self.assertEqual(
-            HeatmapColor.wrap(inner, HeatmapColor.BOLD),
-            f"{HeatmapColor.BOLD}{HeatmapColor.CYAN}x{HeatmapColor.RESET}",
+            Colors.bold(inner),
+            f"{Colors.BOLD}{Colors.CYAN}x{Colors.RESET}",
         )
 
     def test_width_alignment_preserved(self):
