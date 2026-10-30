@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -54,6 +55,7 @@ def file_fingerprint(db_path: str) -> Optional[list]:
     return [db_pair, wal_pair]
 
 
+@functools.lru_cache(maxsize=None)
 def _compute_code_hash() -> Optional[str]:
     """Compute sha256 hex of parser.py, models.py, and cache.py concatenated."""
     pkg_dir = os.path.dirname(__file__)
