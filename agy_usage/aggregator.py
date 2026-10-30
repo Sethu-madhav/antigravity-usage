@@ -55,6 +55,26 @@ class UsageAggregator:
         return daily
 
     @staticmethod
+    def aggregate_hourly(sessions: List[SessionSummary]) -> Dict[Tuple[date, int], TokenUsage]:
+        """Aggregate usage by (calendar date, local hour) of step timestamps.
+
+        Mirrors aggregate_daily's bucketing (step timestamps, falling back to the
+        session start time) so hourly totals sum to the daily totals.
+        """
+        hourly: Dict[Tuple[date, int], TokenUsage] = {}
+
+        for s in sessions:
+            if s.steps:
+                for step in s.steps:
+                    key = (step.timestamp.date(), step.timestamp.hour)
+                    hourly[key] = hourly.get(key, TokenUsage()).add(step.usage)
+            elif s.start_time:
+                key = (s.start_time.date(), s.start_time.hour)
+                hourly[key] = hourly.get(key, TokenUsage()).add(s.usage)
+
+        return hourly
+
+    @staticmethod
     def aggregate_weekly(
         sessions: List[SessionSummary],
         daily_data: Optional[Dict[date, DailyUsage]] = None,

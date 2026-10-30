@@ -27,7 +27,7 @@ from agy_usage.display import (
     truncate_ansi,
 )
 from agy_usage.exporter import UsageExporter
-from agy_usage.heatmap import TerminalHeatmap
+from agy_usage.heatmap import HourOfDayHeatmap, TerminalHeatmap
 from agy_usage.limits import (
     CRIT,
     TIERS,
@@ -56,6 +56,7 @@ Examples:
   agy-usage statusline            Compact quota status line for shell prompt or tmux
   agy-usage heatmap               Show full GitHub-style contribution heatmap
   agy-usage heatmap --metric cached  Heatmap colored by cached tokens
+  agy-usage heatmap --metric hour-of-day  Weekday x hour activity grid
   agy-usage sessions              List recent conversation sessions and token stats
   agy-usage session <id>          Inspect token usage totals for a session
   agy-usage weekly                Show weekly aggregated usage table & bar chart
@@ -166,9 +167,10 @@ Examples:
     sub_heatmap.add_argument(
         "-m",
         "--metric",
-        choices=["total", "cached", "input", "output", "thoughts"],
+        choices=["total", "cached", "input", "output", "thoughts", "cache-efficiency", "hour-of-day"],
         default="total",
-        help="Metric used to calculate heatmap color intensity (default: total)",
+        help="Metric used to calculate heatmap color intensity; cache-efficiency is the per-day cache hit rate, "
+        "hour-of-day shows a weekday x hour grid (default: total)",
     )
     sub_heatmap.add_argument(
         "--details",
@@ -539,13 +541,15 @@ def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> int
         metric=args.metric,
         weeks=args.weeks,
     )
+    if args.metric == "hour-of-day":
+        heatmap = HourOfDayHeatmap(UsageAggregator.aggregate_hourly(sessions), weeks=args.weeks)
 
     if heatmap.is_terminal_narrow:
         print(Colors.yellow(
             f"Warning: Terminal width ({heatmap.term_cols}) is narrower than heatmap ({heatmap.required_cols} columns); output may wrap."
         ), file=sys.stderr)
     print()
-    print(Colors.bold(Colors.cyan(f"── GITHUB-STYLE CONTRIBUTION HEATMAP ({args.metric.upper()} TOKENS) " + "──" * 25)))
+    print(Colors.bold(Colors.cyan(f"── GITHUB-STYLE CONTRIBUTION HEATMAP ({heatmap.metric_label.upper()}) " + "──" * 25)))
     print(heatmap.render())
     print()
 
