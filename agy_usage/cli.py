@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import io
+import json
 import sys
 import time
 from contextlib import redirect_stdout
@@ -32,6 +34,7 @@ from agy_usage.limits import (
     TIERS,
     WARN_MODERATE,
     LimitsCalculator,
+    MultiPoolLimits,
     WindowStats,
     get_status_badge,
     parse_token_amount,
@@ -949,8 +952,10 @@ def _parse_limit_arg(raw: Optional[str], flag_name: str) -> Optional[int]:
     return parsed_val
 
 
-def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
-    """Display 5-hour rolling limit and weekly quota limits across Gemini, Argon, and Claude pools."""
+def _compute_pools_from_args(
+    sessions: List[SessionSummary], args: argparse.Namespace, now: datetime
+) -> MultiPoolLimits:
+    """Parse the quota override flags (warning on bad ones) and compute every pool."""
     tier = getattr(args, "tier", None)
     custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
     custom_weekly = _parse_limit_arg(getattr(args, "weekly_limit", None), "--weekly-limit")
@@ -958,9 +963,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     argon_rem_pct = getattr(args, "argon_remaining_pct", None)
     custom_claude_5h = _parse_limit_arg(getattr(args, "claude_five_h_limit", None), "--claude-5h-limit")
     custom_claude_weekly = _parse_limit_arg(getattr(args, "claude_weekly_limit", None), "--claude-weekly-limit")
-
-    now_dt = datetime.now()
-    pools = LimitsCalculator.compute_all_pools(
+    return LimitsCalculator.compute_all_pools(
         sessions,
         tier_name=tier,
         five_h_limit=custom_5h,
@@ -969,8 +972,33 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
         argon_remaining_pct=argon_rem_pct,
         claude_five_h_limit=custom_claude_5h,
         claude_weekly_limit=custom_claude_weekly,
-        now=now_dt,
+        now=now,
     )
+
+
+def _refresh_countdown(w: WindowStats, now: datetime) -> str:
+    """'in 3h 30m', 'Ready' or 'unknown' for when a quota window refreshes."""
+    if w.is_unknown:
+        return "unknown"
+    if w.refresh_time and (w.usage.total_tokens > 0 or w.pct_used > 0):
+        secs = (w.refresh_time - now).total_seconds()
+        if secs > 0:
+            return f"in {format_duration(secs)}"
+    return "Ready"
+
+
+_BADGE_LEVELS = {  # badge -> (plain badge, level, tmux colour)
+    "🔴": ("[ALERT]", "critical", "red"),
+    "🟡": ("[WARN]", "warning", "yellow"),
+    "⚪": ("[UNKNOWN]", "unknown", "colour244"),
+    "🟢": ("[OK]", "healthy", "green"),
+}
+
+
+def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
+    """Display 5-hour rolling limit and weekly quota limits across Gemini, Argon, and Claude pools."""
+    now_dt = datetime.now()
+    pools = _compute_pools_from_args(sessions, args, now_dt)
     w_5h = pools.gemini_5h
     w_7d = pools.gemini_7d
     argon_7d = pools.argon_7d
@@ -992,7 +1020,6 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
 
     # JSON export support
     if getattr(args, "json", False):
-        import json
         payload = {
             "tier": tier_cfg.name,
             "checked_at": now_str,
@@ -1016,16 +1043,17 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
 
     # CSV export support
     if getattr(args, "csv", False):
-        import csv
-        import io
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(["Window", "Total Tokens", "Cached Tokens", "Billable Tokens", "Limit Tokens", "Pct Remaining", "Pct Used", "Tokens Remaining", "Est Cost USD", "Turns", "Sessions"])
-        writer.writerow(["5-Hour Sprint", w_5h.usage.total_tokens, w_5h.usage.cached_tokens, w_5h.usage.billable_tokens, w_5h.limit_tokens, *_csv_quota_cells(w_5h), round(w_5h.estimated_cost, 4), w_5h.step_count, w_5h.session_count])
-        writer.writerow(["Weekly Cap", w_7d.usage.total_tokens, w_7d.usage.cached_tokens, w_7d.usage.billable_tokens, w_7d.limit_tokens, *_csv_quota_cells(w_7d), round(w_7d.estimated_cost, 4), w_7d.step_count, w_7d.session_count])
-        writer.writerow(["Argon Weekly Cap", argon_7d.usage.total_tokens, argon_7d.usage.cached_tokens, argon_7d.usage.billable_tokens, argon_7d.limit_tokens, *_csv_quota_cells(argon_7d), round(argon_7d.estimated_cost, 4), argon_7d.step_count, argon_7d.session_count])
-        writer.writerow(["Claude & GPT 5-Hour", claude_5h.usage.total_tokens, claude_5h.usage.cached_tokens, claude_5h.usage.billable_tokens, claude_5h.limit_tokens, *_csv_quota_cells(claude_5h), round(claude_5h.estimated_cost, 4), claude_5h.step_count, claude_5h.session_count])
-        writer.writerow(["Claude & GPT Weekly Cap", claude_7d.usage.total_tokens, claude_7d.usage.cached_tokens, claude_7d.usage.billable_tokens, claude_7d.limit_tokens, *_csv_quota_cells(claude_7d), round(claude_7d.estimated_cost, 4), claude_7d.step_count, claude_7d.session_count])
+        for label, w in (
+            ("5-Hour Sprint", w_5h),
+            ("Weekly Cap", w_7d),
+            ("Argon Weekly Cap", argon_7d),
+            ("Claude & GPT 5-Hour", claude_5h),
+            ("Claude & GPT Weekly Cap", claude_7d),
+        ):
+            writer.writerow([label, w.usage.total_tokens, w.usage.cached_tokens, w.usage.billable_tokens, w.limit_tokens, *_csv_quota_cells(w), round(w.estimated_cost, 4), w.step_count, w.session_count])
         print(buf.getvalue().strip())
         return 0
 
@@ -1052,19 +1080,10 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     print(f"  {Colors.bold('System Status:')}  {badge} {status_msg}")
     print()
 
-    def _countdown(w) -> str:
-        if w.is_unknown:
-            return "unknown"
-        if w.refresh_time and (w.usage.total_tokens > 0 or w.pct_used > 0):
-            secs = (w.refresh_time - now_dt).total_seconds()
-            if secs > 0:
-                return f"in {format_duration(secs)}"
-        return "Ready"
-
-    w5_countdown = _countdown(w_5h)
-    w7_countdown = _countdown(w_7d)
-    c5_countdown = _countdown(claude_5h)
-    argon_countdown = _countdown(argon_7d)
+    w5_countdown = _refresh_countdown(w_5h, now_dt)
+    w7_countdown = _refresh_countdown(w_7d, now_dt)
+    c5_countdown = _refresh_countdown(claude_5h, now_dt)
+    argon_countdown = _refresh_countdown(argon_7d, now_dt)
 
     def _rem_color(pct_rem: float):
         if pct_rem >= 40.0:
@@ -1202,26 +1221,8 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
 
 def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display compact single-line quota status for shell prompt, tmux, or status bars."""
-    tier = getattr(args, "tier", None)
-    custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
-    custom_weekly = _parse_limit_arg(getattr(args, "weekly_limit", None), "--weekly-limit")
-    custom_argon_weekly = _parse_limit_arg(getattr(args, "argon_weekly_limit", None), "--argon-weekly-limit")
-    argon_rem_pct = getattr(args, "argon_remaining_pct", None)
-    custom_claude_5h = _parse_limit_arg(getattr(args, "claude_five_h_limit", None), "--claude-5h-limit")
-    custom_claude_weekly = _parse_limit_arg(getattr(args, "claude_weekly_limit", None), "--claude-weekly-limit")
-
     now = datetime.now()
-    pools = LimitsCalculator.compute_all_pools(
-        sessions,
-        tier_name=tier,
-        five_h_limit=custom_5h,
-        weekly_limit=custom_weekly,
-        argon_weekly_limit=custom_argon_weekly,
-        argon_remaining_pct=argon_rem_pct,
-        claude_five_h_limit=custom_claude_5h,
-        claude_weekly_limit=custom_claude_weekly,
-        now=now,
-    )
+    pools = _compute_pools_from_args(sessions, args, now)
     w_5h = pools.gemini_5h
     w_7d = pools.gemini_7d
     argon_7d = pools.argon_7d
@@ -1229,14 +1230,9 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     claude_7d = pools.claude_7d
     tier_cfg = pools.tier
 
-    s5 = (w_5h.refresh_time - now).total_seconds() if (w_5h.refresh_time and (w_5h.usage.total_tokens > 0 or w_5h.pct_used > 0)) else 0
-    rec_5h = "unknown" if w_5h.is_unknown else (f"in {format_duration(s5)}" if s5 > 0 else "Ready")
-
-    s7 = (w_7d.refresh_time - now).total_seconds() if (w_7d.refresh_time and (w_7d.usage.total_tokens > 0 or w_7d.pct_used > 0)) else 0
-    rec_7d = "unknown" if w_7d.is_unknown else (f"in {format_duration(s7)}" if s7 > 0 else "Ready")
-
-    s_argon = (argon_7d.refresh_time - now).total_seconds() if (argon_7d.refresh_time and (argon_7d.usage.total_tokens > 0 or argon_7d.pct_used > 0)) else 0
-    rec_argon = "unknown" if argon_7d.is_unknown else (f"in {format_duration(s_argon)}" if s_argon > 0 else "Ready")
+    rec_5h = _refresh_countdown(w_5h, now)
+    rec_7d = _refresh_countdown(w_7d, now)
+    rec_argon = _refresh_countdown(argon_7d, now)
 
     pct_5h = None if w_5h.is_unknown else round(w_5h.pct_remaining)
     pct_7d = None if w_7d.is_unknown else round(w_7d.pct_remaining)
@@ -1268,23 +1264,9 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         claude_5h=claude_5h,
         claude_7d=claude_7d,
     )
-    if badge == "🔴":
-        badge_plain = "[ALERT]"
-        level = "critical"
-        tmux_color = "red"
-    elif badge == "🟡":
-        badge_plain = "[WARN]"
-        level = "warning"
-        tmux_color = "yellow"
-    elif badge == "⚪":
-        badge_plain = "[UNKNOWN]"
-        level = "unknown"
-        tmux_color = "colour244"
-    else:
+    if badge not in _BADGE_LEVELS:
         badge = "🟢"
-        badge_plain = "[OK]"
-        level = "healthy"
-        tmux_color = "green"
+    badge_plain, level, tmux_color = _BADGE_LEVELS[badge]
 
     def _color_for_window(w: WindowStats) -> Callable[[str], str]:
         if w.is_unknown:
@@ -1304,7 +1286,6 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
 
     # JSON export
     if getattr(args, "json", False):
-        import json
         payload = {
             "status": level,
             "badge": badge,
@@ -1332,8 +1313,6 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
 
     # CSV export
     if getattr(args, "csv", False):
-        import csv
-        import io
         buf = io.StringIO()
         writer = csv.writer(buf)
         headers = [
@@ -1397,9 +1376,10 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
                 file=sys.stderr,
             )
         res = custom_format
+        badge_text = badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge
         replacements = {
-            "{status}": badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge,
-            "{badge}": badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge,
+            "{status}": badge_text,
+            "{badge}": badge_text,
             "{5h_pct}": rem_5h.rstrip("%"),
             "{5h_refresh}": rec_5h,
             "{wk_pct}": rem_7d.rstrip("%"),
