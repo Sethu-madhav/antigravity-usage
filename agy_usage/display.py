@@ -84,6 +84,11 @@ class Colors:
         _COLOR_OVERRIDE = value
 
     @classmethod
+    def get_override(cls) -> Optional[bool]:
+        """Current global override (True/False), or None when auto-detecting."""
+        return _COLOR_OVERRIDE
+
+    @classmethod
     def enabled(cls) -> bool:
         """Auto-detect color support: TTY-gated, NO_COLOR-aware (BUG-009).
 
