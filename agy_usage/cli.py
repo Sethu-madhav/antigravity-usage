@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from typing import Callable, List, Optional
 
 from agy_usage import __version__
-from agy_usage import display as _display
 from agy_usage.aggregator import UsageAggregator
 from agy_usage.display import (
     Colors,
@@ -379,10 +378,17 @@ def get_sessions(args: argparse.Namespace) -> List[SessionSummary]:
     return sessions
 
 
+def _require_sessions(sessions: List[SessionSummary]) -> bool:
+    """Print the shared 'no sessions' warning to stderr; True when there are sessions."""
+    if sessions:
+        return True
+    print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    return False
+
+
 def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display default dashboard overview."""
-    if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    if not _require_sessions(sessions):
         return 1
 
     daily_data = UsageAggregator.aggregate_daily(sessions)
@@ -469,8 +475,7 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> in
 
 def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Render full GitHub-style activity heatmap."""
-    if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    if not _require_sessions(sessions):
         return 1
 
     daily_data = UsageAggregator.aggregate_daily(sessions)
@@ -523,28 +528,23 @@ def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> int
     return 0
 
 
+_SESSION_SORT_KEYS = {
+    "tokens": lambda s: s.usage.total_tokens,
+    "cached": lambda s: s.usage.cached_tokens,
+    "steps": lambda s: s.step_count,
+    "duration": lambda s: s.duration_seconds,
+    "date": lambda s: s.start_time.timestamp() if s.start_time else 0,
+}
+
+
 def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """List session summaries with token breakdowns."""
-    if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    if not _require_sessions(sessions):
         return 1
 
     # Sort
-    sort_key = args.sort
-    if sort_key == "tokens":
-        sessions = sorted(sessions, key=lambda s: s.usage.total_tokens, reverse=True)
-    elif sort_key == "cached":
-        sessions = sorted(sessions, key=lambda s: s.usage.cached_tokens, reverse=True)
-    elif sort_key == "steps":
-        sessions = sorted(sessions, key=lambda s: s.step_count, reverse=True)
-    elif sort_key == "duration":
-        sessions = sorted(sessions, key=lambda s: s.duration_seconds, reverse=True)
-    else:  # date
-        sessions = sorted(
-            sessions,
-            key=lambda s: s.start_time.timestamp() if s.start_time else 0,
-            reverse=True,
-        )
+    key = _SESSION_SORT_KEYS.get(args.sort, _SESSION_SORT_KEYS["date"])
+    sessions = sorted(sessions, key=key, reverse=True)
 
     limit = args.limit if args.limit > 0 else len(sessions)
     selected = sessions[:limit]
@@ -586,8 +586,7 @@ def cmd_session_inspect(
     show_details: bool = False,
 ) -> int:
     """Inspect a session's token totals and optionally turn-by-turn details."""
-    if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    if not _require_sessions(sessions):
         return 1
 
     target_id = (session_id_arg or "current").strip().lower()
@@ -742,8 +741,7 @@ def cmd_session_inspect(
 
 def cmd_weekly(sessions: List[SessionSummary]) -> int:
     """Display weekly aggregated token table and volume bars."""
-    if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    if not _require_sessions(sessions):
         return 1
 
     weeks = UsageAggregator.aggregate_weekly(sessions)
@@ -779,8 +777,7 @@ def cmd_weekly(sessions: List[SessionSummary]) -> int:
 
 def cmd_monthly(sessions: List[SessionSummary]) -> int:
     """Display monthly aggregated token table and volume bars."""
-    if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    if not _require_sessions(sessions):
         return 1
 
     months = UsageAggregator.aggregate_monthly(sessions)
@@ -814,8 +811,7 @@ def cmd_monthly(sessions: List[SessionSummary]) -> int:
 
 def cmd_models(sessions: List[SessionSummary]) -> int:
     """Display breakdown by model."""
-    if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+    if not _require_sessions(sessions):
         return 1
 
     models = UsageAggregator.aggregate_models(sessions)
@@ -875,7 +871,7 @@ def cmd_live(args: argparse.Namespace) -> int:
         return 0
 
     print(Colors.cyan(f"Starting Antigravity Usage live monitor (refreshing every {interval}s). Press Ctrl+C to exit."))
-    prev_override = _display._COLOR_OVERRIDE
+    prev_override = Colors.get_override()
     Colors.set_override(Colors.enabled())
     try:
         try:
@@ -1485,6 +1481,27 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     return 0
 
 
+def _inspect_from_args(sessions: List[SessionSummary], args: argparse.Namespace, session_id: str) -> int:
+    return cmd_session_inspect(
+        sessions,
+        session_id,
+        turns_limit=getattr(args, "turns", None),
+        show_details=getattr(args, "details", False),
+    )
+
+
+_SESSION_COMMANDS = {
+    "overview": lambda sessions, args: cmd_overview(sessions, args),
+    "heatmap": lambda sessions, args: cmd_heatmap(sessions, args),
+    "sessions": lambda sessions, args: cmd_sessions(sessions, args),
+    "current": lambda sessions, args: _inspect_from_args(sessions, args, "current"),
+    "session": lambda sessions, args: _inspect_from_args(sessions, args, args.session_id),
+    "weekly": lambda sessions, args: cmd_weekly(sessions),
+    "monthly": lambda sessions, args: cmd_monthly(sessions),
+    "models": lambda sessions, args: cmd_models(sessions),
+}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Entry point for CLI execution."""
     args = parse_args(argv)
@@ -1522,28 +1539,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         UsageExporter.export(sessions, format_type="csv")
         return 0
 
-    if sub is None or sub == "overview":
-        return cmd_overview(sessions, args)
-    elif sub == "heatmap":
-        return cmd_heatmap(sessions, args)
-    elif sub == "sessions":
-        return cmd_sessions(sessions, args)
-    elif sub == "current":
-        turns = getattr(args, "turns", None)
-        details = getattr(args, "details", False)
-        return cmd_session_inspect(sessions, "current", turns_limit=turns, show_details=details)
-    elif sub == "session":
-        turns = getattr(args, "turns", None)
-        details = getattr(args, "details", False)
-        return cmd_session_inspect(sessions, args.session_id, turns_limit=turns, show_details=details)
-    elif sub == "weekly":
-        return cmd_weekly(sessions)
-    elif sub == "monthly":
-        return cmd_monthly(sessions)
-    elif sub == "models":
-        return cmd_models(sessions)
-    else:
-        return cmd_overview(sessions, args)
+    handler = _SESSION_COMMANDS.get(sub, _SESSION_COMMANDS["overview"])
+    return handler(sessions, args)
 
 
 if __name__ == "__main__":
