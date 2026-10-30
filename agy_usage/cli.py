@@ -68,18 +68,19 @@ Examples:
 
     # Directory selection flags
     dir_group = parser.add_argument_group("Data Source Options")
-    dir_group.add_argument(
+    dir_mx = dir_group.add_mutually_exclusive_group()
+    dir_mx.add_argument(
         "--dir",
         dest="custom_dir",
         metavar="PATH",
         help="Custom directory containing Antigravity conversation SQLite databases",
     )
-    dir_group.add_argument(
+    dir_mx.add_argument(
         "--cli-only",
         action="store_true",
         help="Scan Antigravity CLI conversations directory only",
     )
-    dir_group.add_argument(
+    dir_mx.add_argument(
         "--ide-only",
         action="store_true",
         help="Scan Antigravity IDE conversations directory only",
@@ -103,20 +104,21 @@ Examples:
     # being clobbered by the subparser's own defaults.
     common = argparse.ArgumentParser(add_help=False)
     common_dir_group = common.add_argument_group("Data Source Options")
-    common_dir_group.add_argument(
+    common_dir_mx = common_dir_group.add_mutually_exclusive_group()
+    common_dir_mx.add_argument(
         "--dir",
         dest="custom_dir",
         metavar="PATH",
         default=argparse.SUPPRESS,
         help="Custom directory containing Antigravity conversation SQLite databases",
     )
-    common_dir_group.add_argument(
+    common_dir_mx.add_argument(
         "--cli-only",
         action="store_true",
         default=argparse.SUPPRESS,
         help="Scan Antigravity CLI conversations directory only",
     )
-    common_dir_group.add_argument(
+    common_dir_mx.add_argument(
         "--ide-only",
         action="store_true",
         default=argparse.SUPPRESS,
@@ -342,6 +344,16 @@ Examples:
         help="Calibrate Argon weekly cap from the 'Remaining %%' shown in Antigravity UI",
     )
     sub_statusline.add_argument(
+        "--claude-5h-limit",
+        dest="claude_five_h_limit",
+        help="Custom Claude 5-hour limit in tokens (e.g. 25M)",
+    )
+    sub_statusline.add_argument(
+        "--claude-weekly-limit",
+        dest="claude_weekly_limit",
+        help="Custom Claude weekly limit in tokens (e.g. 150M)",
+    )
+    sub_statusline.add_argument(
         "-s",
         "--short",
         action="store_true",
@@ -364,6 +376,17 @@ Examples:
     )
 
     parsed = parser.parse_args(args)
+    active_sources = [
+        flag
+        for flag, val in (
+            ("--dir", bool(getattr(parsed, "custom_dir", None))),
+            ("--cli-only", bool(getattr(parsed, "cli_only", False))),
+            ("--ide-only", bool(getattr(parsed, "ide_only", False))),
+        )
+        if val
+    ]
+    if len(active_sources) > 1:
+        parser.error(f"argument {active_sources[1]}: not allowed with argument {active_sources[0]}")
     if hasattr(parsed, "weeks") and parsed.weeks is not None:
         parsed.weeks = max(4, min(52, parsed.weeks))
     return parsed
@@ -955,15 +978,27 @@ def _cache_age_text(age_seconds: Optional[float]) -> str:
     return f"{hours} h {minutes} min ago" if minutes else f"{hours} h ago"
 
 
+def _parse_limit_arg(raw: Optional[str], flag_name: str) -> Optional[int]:
+    if raw is None:
+        return None
+    parsed_val = parse_token_amount(raw)
+    if parsed_val is None:
+        print(
+            f"Warning: ignoring invalid {flag_name} value {raw!r}; falling back to tier default.",
+            file=sys.stderr,
+        )
+    return parsed_val
+
+
 def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display 5-hour rolling limit and weekly quota limits across Gemini, Argon, and Claude pools."""
     tier = getattr(args, "tier", "pro") or "pro"
-    custom_5h = parse_token_amount(getattr(args, "five_h_limit", None))
-    custom_weekly = parse_token_amount(getattr(args, "weekly_limit", None))
-    custom_argon_weekly = parse_token_amount(getattr(args, "argon_weekly_limit", None))
+    custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
+    custom_weekly = _parse_limit_arg(getattr(args, "weekly_limit", None), "--weekly-limit")
+    custom_argon_weekly = _parse_limit_arg(getattr(args, "argon_weekly_limit", None), "--argon-weekly-limit")
     argon_rem_pct = getattr(args, "argon_remaining_pct", None)
-    custom_claude_5h = parse_token_amount(getattr(args, "claude_five_h_limit", None))
-    custom_claude_weekly = parse_token_amount(getattr(args, "claude_weekly_limit", None))
+    custom_claude_5h = _parse_limit_arg(getattr(args, "claude_five_h_limit", None), "--claude-5h-limit")
+    custom_claude_weekly = _parse_limit_arg(getattr(args, "claude_weekly_limit", None), "--claude-weekly-limit")
 
     now_dt = datetime.now()
     pools = LimitsCalculator.compute_all_pools(
@@ -992,6 +1027,9 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
         claude_7d=claude_7d,
     )
     now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    if getattr(args, "json", False) and getattr(args, "csv", False):
+        print("Warning: both --json and --csv specified; using --json.", file=sys.stderr)
 
     # JSON export support
     if getattr(args, "json", False):
@@ -1204,10 +1242,12 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
 def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display compact single-line quota status for shell prompt, tmux, or status bars."""
     tier = getattr(args, "tier", "pro") or "pro"
-    custom_5h = parse_token_amount(getattr(args, "five_h_limit", None))
-    custom_weekly = parse_token_amount(getattr(args, "weekly_limit", None))
-    custom_argon_weekly = parse_token_amount(getattr(args, "argon_weekly_limit", None))
+    custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
+    custom_weekly = _parse_limit_arg(getattr(args, "weekly_limit", None), "--weekly-limit")
+    custom_argon_weekly = _parse_limit_arg(getattr(args, "argon_weekly_limit", None), "--argon-weekly-limit")
     argon_rem_pct = getattr(args, "argon_remaining_pct", None)
+    custom_claude_5h = _parse_limit_arg(getattr(args, "claude_five_h_limit", None), "--claude-5h-limit")
+    custom_claude_weekly = _parse_limit_arg(getattr(args, "claude_weekly_limit", None), "--claude-weekly-limit")
 
     now = datetime.now()
     pools = LimitsCalculator.compute_all_pools(
@@ -1217,6 +1257,8 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         weekly_limit=custom_weekly,
         argon_weekly_limit=custom_argon_weekly,
         argon_remaining_pct=argon_rem_pct,
+        claude_five_h_limit=custom_claude_5h,
+        claude_weekly_limit=custom_claude_weekly,
         now=now,
     )
     w_5h = pools.gemini_5h
@@ -1295,6 +1337,9 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     color_5h = _color_for_window(w_5h)
     color_7d = _color_for_window(w_7d)
     color_argon = _color_for_window(argon_7d)
+
+    if getattr(args, "json", False) and getattr(args, "csv", False):
+        print("Warning: both --json and --csv specified; using --json.", file=sys.stderr)
 
     # JSON export
     if getattr(args, "json", False):
@@ -1378,6 +1423,19 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     # Custom template format
     custom_format = getattr(args, "format", None)
     if custom_format:
+        ignored = [
+            f
+            for f, active in (
+                ("--tmux", getattr(args, "tmux", False)),
+                ("--short", getattr(args, "short", False)),
+            )
+            if active
+        ]
+        if ignored:
+            print(
+                f"Warning: --format ignores {', '.join(ignored)}.",
+                file=sys.stderr,
+            )
         res = custom_format
         replacements = {
             "{status}": badge_plain if getattr(args, "plain", False) or not Colors.enabled() else badge,
@@ -1401,6 +1459,19 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
 
     # Tmux mode
     if getattr(args, "tmux", False):
+        ignored = [
+            f
+            for f, active in (
+                ("--short", getattr(args, "short", False)),
+                ("--plain", getattr(args, "plain", False)),
+            )
+            if active
+        ]
+        if ignored:
+            print(
+                f"Warning: --tmux ignores {', '.join(ignored)}.",
+                file=sys.stderr,
+            )
         argon_seg = f"#[fg=colour238]| #[fg=white]Ar: {rem_argon} #[fg=colour244]({rec_argon}) " if has_argon else ""
         print(
             f"#[fg={tmux_color}]● #[fg=white]5h: {rem_5h} #[fg=colour244]({rec_5h}) "
@@ -1463,6 +1534,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_statusline(sessions, args)
 
     # Handle global export options for other commands
+    if getattr(args, "json", False) and getattr(args, "csv", False):
+        print("Warning: both --json and --csv specified; using --json.", file=sys.stderr)
+
     if args.json:
         UsageExporter.export(sessions, format_type="json")
         return 0
