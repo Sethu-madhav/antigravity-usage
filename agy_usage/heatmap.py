@@ -110,8 +110,20 @@ class TerminalHeatmap:
         """Check if terminal is narrower than required columns."""
         return self.term_cols < self.required_cols
 
-    def _get_metric_val(self, usage: TokenUsage) -> int:
+    @property
+    def metric_label(self) -> str:
+        """Human-readable name of the plotted metric, used in titles and the summary."""
+        if self.metric == "cache-efficiency":
+            return "Cache Efficiency"
+        if self.metric == "hour-of-day":
+            return "Tokens by Hour of Day"
+        return self.metric.capitalize() + " Tokens"
+
+    def _get_metric_val(self, usage: TokenUsage) -> float:
         """Extract requested metric value from TokenUsage."""
+        if self.metric == "cache-efficiency":
+            # Same definition as TokenUsage.cache_hit_rate (0.0 when there is no input).
+            return usage.cache_hit_rate
         if self.metric == "cached":
             return usage.cached_tokens
         elif self.metric in ("input", "prompt"):
@@ -172,6 +184,7 @@ class TerminalHeatmap:
         max_val = 0
         total_period_val = 0
         active_days_count = 0
+        window_usage = TokenUsage()
 
         # Build 7 x num_weeks matrix
         matrix: List[List[Tuple[date, int, int]]] = [[] for _ in range(7)]
@@ -181,12 +194,17 @@ class TerminalHeatmap:
                 curr_date = start_monday + timedelta(days=w * 7 + d_idx)
                 val = 0
                 if curr_date in self.daily_data:
-                    val = self._get_metric_val(self.daily_data[curr_date].usage)
+                    usage = self.daily_data[curr_date].usage
+                    val = self._get_metric_val(usage)
+                    window_usage = window_usage.add(usage)
                     if val > 0:
-                        active_days_count += 1
                         total_period_val += val
                         if val > max_val:
                             max_val = val
+                    # A ratio is meaningful whenever the day had any input, even at 0%.
+                    has_data = usage.total_prompt_tokens > 0 if self.metric == "cache-efficiency" else val > 0
+                    if has_data:
+                        active_days_count += 1
                 matrix[d_idx].append((curr_date, val, 0))
 
         thresholds = self._calculate_thresholds(max_val)
@@ -249,9 +267,14 @@ class TerminalHeatmap:
         legend_str = f"{HeatmapColor.wrap('Less ', HeatmapColor.DIM)}{legend_cells}{HeatmapColor.wrap('More', HeatmapColor.DIM)}"
 
         # Metric label
-        metric_title = self.metric.capitalize() + " Tokens"
+        metric_title = self.metric_label
+        if self.metric == "cache-efficiency":
+            # Overall ratio across the window, not a sum of per-day percentages.
+            summary_value = f"{window_usage.cache_hit_rate:.1f}%"
+        else:
+            summary_value = f"{total_period_val:,}"
         summary_info = (
-            f"{HeatmapColor.wrap(f'{total_period_val:,}', HeatmapColor.BOLD)} {metric_title} "
+            f"{HeatmapColor.wrap(summary_value, HeatmapColor.BOLD)} {metric_title} "
             f"across {HeatmapColor.wrap(str(active_days_count), HeatmapColor.CYAN)} active days "
             f"in last {self.num_weeks} weeks"
         )
@@ -259,4 +282,66 @@ class TerminalHeatmap:
         lines.append("")
         lines.append(f" {legend_str}    {summary_info}")
 
+        return "\n".join(lines)
+
+
+class HourOfDayHeatmap(TerminalHeatmap):
+    """Weekday x hour-of-day grid (7 rows x 24 columns) of token activity.
+
+    Aggregates the last ``weeks`` weeks of per-hour usage by weekday and local
+    hour, answering "when do I use the CLI?" rather than "which days?".
+    """
+
+    HOUR_CELL_WIDTH = 2
+    HOUR_LABEL_STEP = 3
+
+    def __init__(
+        self,
+        hourly_data: Dict[Tuple[date, int], TokenUsage],
+        weeks: Optional[int] = None,
+        end_date: Optional[date] = None,
+        term_cols: Optional[int] = None,
+    ):
+        super().__init__({}, metric="hour-of-day", weeks=weeks, end_date=end_date, term_cols=term_cols)
+        self.hourly_data = hourly_data
+
+    @property
+    def required_cols(self) -> int:
+        return 24 * self.HOUR_CELL_WIDTH + 8
+
+    def render(self) -> str:
+        start_monday, _ = self._week_bounds()
+        grid = [[0] * 24 for _ in range(7)]
+        total = 0
+        for (d, hour), usage in self.hourly_data.items():
+            if start_monday <= d <= self.end_date:
+                grid[d.weekday()][hour] += usage.total_tokens
+                total += usage.total_tokens
+
+        max_val = max(max(row) for row in grid)
+        thresholds = self._calculate_thresholds(max_val)
+
+        header = "".join(
+            f"{h:02d}".ljust(self.HOUR_LABEL_STEP * self.HOUR_CELL_WIDTH)
+            for h in range(0, 24, self.HOUR_LABEL_STEP)
+        )
+        lines = [HeatmapColor.wrap("     " + header.rstrip(), HeatmapColor.DIM)]
+        for day_idx in range(7):
+            row_str = HeatmapColor.wrap(self.WEEKDAY_LABELS[day_idx], HeatmapColor.DIM) + " "
+            for hour in range(24):
+                level = self._get_level(grid[day_idx][hour], thresholds)
+                row_str += HeatmapColor.cell(level, "■") + " "
+            lines.append(row_str)
+
+        legend_cells = "".join(HeatmapColor.cell(lvl, "■") + " " for lvl in range(5))
+        legend_str = f"{HeatmapColor.wrap('Less ', HeatmapColor.DIM)}{legend_cells}{HeatmapColor.wrap('More', HeatmapColor.DIM)}"
+
+        hour_totals = [sum(grid[d][h] for d in range(7)) for h in range(24)]
+        summary_info = f"{HeatmapColor.wrap(f'{total:,}', HeatmapColor.BOLD)} Tokens in last {self.num_weeks} weeks"
+        if total > 0:
+            peak = hour_totals.index(max(hour_totals))
+            summary_info += f", busiest hour {HeatmapColor.wrap(f'{peak:02d}:00', HeatmapColor.CYAN)}"
+
+        lines.append("")
+        lines.append(f" {legend_str}    {summary_info}")
         return "\n".join(lines)
