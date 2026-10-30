@@ -728,9 +728,10 @@ class AntigravityParser:
         custom_dir: Optional[str] = None,
         source_mode: str = "all",
         use_cache: bool = True,
+        cache: Optional[SessionCache] = None,
     ) -> List[SessionSummary]:
         """Scan all relevant directories or a specified directory."""
-        cache = SessionCache.load() if use_cache else None
+        cache = (cache if cache is not None else SessionCache.load()) if use_cache else None
         all_sessions: List[SessionSummary] = []
         mtimes: Dict[str, float] = {}
 
