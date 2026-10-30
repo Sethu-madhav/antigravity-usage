@@ -36,13 +36,17 @@ def _is_caching_disabled() -> bool:
     return val is not None and val != "" and val != "0"
 
 
-def file_fingerprint(db_path: str) -> Optional[list]:
-    """Return fingerprint of a .db file and its -wal companion (if present)."""
-    try:
-        st = os.stat(db_path)
-        db_pair = [st.st_size, st.st_mtime_ns]
-    except OSError:
-        return None
+def file_fingerprint(db_path: str, st: Optional[os.stat_result] = None) -> Optional[list]:
+    """Return fingerprint of a .db file and its -wal companion (if present).
+
+    Pass `st` (an os.stat() of `db_path` already taken) to skip re-statting the db.
+    """
+    if st is None:
+        try:
+            st = os.stat(db_path)
+        except OSError:
+            return None
+    db_pair = [st.st_size, st.st_mtime_ns]
 
     wal_path = db_path + "-wal"
     try:
@@ -237,8 +241,13 @@ class SessionCache:
             entries=entries,
         )
 
-    def get(self, db_path: str, source: str) -> Optional[SessionSummary]:
-        """Return a fresh cached SessionSummary if the file fingerprint matches."""
+    def get(
+        self, db_path: str, source: str, fingerprint: Optional[list] = None
+    ) -> Optional[SessionSummary]:
+        """Return a fresh cached SessionSummary if the file fingerprint matches.
+
+        Pass `fingerprint` (from file_fingerprint) to skip computing it again.
+        """
         if not self._enabled:
             return None
 
@@ -248,7 +257,7 @@ class SessionCache:
             return None
 
         stored_fp = entry.get("fingerprint")
-        curr_fp = file_fingerprint(db_path)
+        curr_fp = fingerprint if fingerprint is not None else file_fingerprint(db_path)
         if curr_fp is None or curr_fp != stored_fp:
             return None
 

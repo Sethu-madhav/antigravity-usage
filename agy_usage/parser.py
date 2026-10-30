@@ -10,7 +10,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
 from agy_usage.models import SessionSummary, StepRecord, TokenUsage, normalize_model_name
@@ -692,9 +692,17 @@ class AntigravityParser:
         if not os.path.isdir(dir_path):
             return []
 
+        # Stat each file once: the sort key and the cache fingerprint share it.
+        globbed = glob.glob(os.path.join(dir_path, "*.db"))
+        stats: Dict[str, Optional[os.stat_result]] = {}
+        for db_file in globbed:
+            try:
+                stats[db_file] = os.stat(db_file)
+            except OSError:
+                stats[db_file] = None  # vanished mid-scan: sorts oldest (BUG-016)
         db_files = sorted(
-            glob.glob(os.path.join(dir_path, "*.db")),
-            key=_mtime_or_zero,
+            globbed,
+            key=lambda f: stats[f].st_mtime if stats[f] is not None else 0.0,
             reverse=True,
         )
 
@@ -703,8 +711,9 @@ class AntigravityParser:
             summary = None
             fp = None
             if cache is not None:
-                fp = file_fingerprint(db_file)
-                summary = cache.get(db_file, source)
+                st = stats[db_file]
+                fp = file_fingerprint(db_file, st=st) if st is not None else None
+                summary = cache.get(db_file, source, fingerprint=fp)
             if summary is None:
                 summary, complete = cls._parse_session_db_checked(db_file, source=source)
                 if summary and complete and fp is not None and cache is not None:
@@ -723,6 +732,14 @@ class AntigravityParser:
         """Scan all relevant directories or a specified directory."""
         cache = SessionCache.load() if use_cache else None
         all_sessions: List[SessionSummary] = []
+        mtimes: Dict[str, float] = {}
+
+        def mtime(path: str) -> float:
+            """_mtime_or_zero, stat-ing each path at most once per scan_all call."""
+            if path not in mtimes:
+                mtimes[path] = _mtime_or_zero(path)
+            return mtimes[path]
+
         if custom_dir:
             source_label = "custom"
             if "antigravity-ide" in custom_dir:
@@ -734,7 +751,7 @@ class AntigravityParser:
             for d_path, s_label in cls.get_default_directories(mode=source_mode):
                 all_sessions.extend(cls.scan_directory(d_path, source=s_label, cache=cache))
 
-            all_sessions = cls._dedupe_by_session_id(all_sessions)
+            all_sessions = cls._dedupe_by_session_id(all_sessions, mtime=mtime)
 
         if cache is not None:
             cache.save()
@@ -743,13 +760,15 @@ class AntigravityParser:
         all_sessions.sort(
             key=lambda s: s.start_time.timestamp()
             if s.start_time
-            else _mtime_or_zero(s.file_path),
+            else mtime(s.file_path),
             reverse=True,
         )
         return all_sessions
 
     @staticmethod
-    def _dedupe_by_session_id(sessions: List[SessionSummary]) -> List[SessionSummary]:
+    def _dedupe_by_session_id(
+        sessions: List[SessionSummary], mtime: Optional[Callable[[str], float]] = None
+    ) -> List[SessionSummary]:
         """Keep one summary per session_id (BUG-015).
 
         The same conversation DB can exist in both the CLI and IDE directories;
@@ -757,10 +776,12 @@ class AntigravityParser:
         key on session_id) stay correct. The copy with the newest file mtime wins;
         on an exact tie the first one scanned (CLI before IDE) is kept.
         """
+        if mtime is None:
+            mtime = _mtime_or_zero
         by_id: Dict[str, SessionSummary] = {}
         for session in sessions:
             kept = by_id.get(session.session_id)
-            if kept is None or _mtime_or_zero(session.file_path) > _mtime_or_zero(kept.file_path):
+            if kept is None or mtime(session.file_path) > mtime(kept.file_path):
                 by_id[session.session_id] = session
         return list(by_id.values())
 
