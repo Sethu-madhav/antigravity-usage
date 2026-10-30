@@ -45,6 +45,88 @@ from agy_usage.models import SessionSummary
 from agy_usage.parser import AntigravityParser
 
 
+def _add_global_flags(parser: argparse.ArgumentParser, suppress_defaults: bool) -> None:
+    """Data-source and output flags shared by the root parser and every subcommand."""
+    extra = {"default": argparse.SUPPRESS} if suppress_defaults else {}
+
+    # Directory selection flags
+    dir_group = parser.add_argument_group("Data Source Options")
+    dir_mx = dir_group.add_mutually_exclusive_group()
+    dir_mx.add_argument(
+        "--dir",
+        dest="custom_dir",
+        metavar="PATH",
+        help="Custom directory containing Antigravity conversation SQLite databases",
+        **extra,
+    )
+    dir_mx.add_argument(
+        "--cli-only",
+        action="store_true",
+        help="Scan Antigravity CLI conversations directory only",
+        **extra,
+    )
+    dir_mx.add_argument(
+        "--ide-only",
+        action="store_true",
+        help="Scan Antigravity IDE conversations directory only",
+        **extra,
+    )
+
+    # Output format flags
+    out_group = parser.add_argument_group("Output Formatting")
+    out_group.add_argument(
+        "--json", action="store_true", help="Output results as JSON", **extra
+    )
+    out_group.add_argument(
+        "--csv", action="store_true", help="Output session summaries as CSV", **extra
+    )
+    out_group.add_argument(
+        "--no-color", action="store_true", help="Disable ANSI color output", **extra
+    )
+
+
+def _add_limit_flags(sub: argparse.ArgumentParser) -> None:
+    """Quota-limit flags shared by the `limits` and `statusline` subcommands."""
+    sub.add_argument(
+        "--tier",
+        choices=["pro", "ultra", "free"],
+        default=None,
+        help="Antigravity subscription plan tier (default: auto-detect from the server, else pro)",
+    )
+    sub.add_argument(
+        "--5h-limit",
+        "--five-hour-limit",
+        dest="five_h_limit",
+        help="Custom Gemini 5-hour limit in tokens (e.g. 50M, 100M)",
+    )
+    sub.add_argument(
+        "--weekly-limit",
+        dest="weekly_limit",
+        help="Custom Gemini weekly limit in tokens (e.g. 250M, 750M)",
+    )
+    sub.add_argument(
+        "--argon-weekly-limit",
+        dest="argon_weekly_limit",
+        help="Custom Gemini 4 Argon weekly limit in tokens (e.g. 25M, 50M)",
+    )
+    sub.add_argument(
+        "--argon-remaining-pct",
+        dest="argon_remaining_pct",
+        type=float,
+        help="Calibrate Argon weekly cap from the 'Remaining %%' shown in Antigravity UI",
+    )
+    sub.add_argument(
+        "--claude-5h-limit",
+        dest="claude_five_h_limit",
+        help="Custom Claude 5-hour limit in tokens (e.g. 25M)",
+    )
+    sub.add_argument(
+        "--claude-weekly-limit",
+        dest="claude_weekly_limit",
+        help="Custom Claude weekly limit in tokens (e.g. 150M)",
+    )
+
+
 def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="agy-usage",
@@ -76,74 +158,14 @@ Examples:
         "-v", "--version", action="version", version=f"%(prog)s {__version__}"
     )
 
-    # Directory selection flags
-    dir_group = parser.add_argument_group("Data Source Options")
-    dir_mx = dir_group.add_mutually_exclusive_group()
-    dir_mx.add_argument(
-        "--dir",
-        dest="custom_dir",
-        metavar="PATH",
-        help="Custom directory containing Antigravity conversation SQLite databases",
-    )
-    dir_mx.add_argument(
-        "--cli-only",
-        action="store_true",
-        help="Scan Antigravity CLI conversations directory only",
-    )
-    dir_mx.add_argument(
-        "--ide-only",
-        action="store_true",
-        help="Scan Antigravity IDE conversations directory only",
-    )
-
-    # Output format flags
-    out_group = parser.add_argument_group("Output Formatting")
-    out_group.add_argument(
-        "--json", action="store_true", help="Output results as JSON"
-    )
-    out_group.add_argument(
-        "--csv", action="store_true", help="Output session summaries as CSV"
-    )
-    out_group.add_argument(
-        "--no-color", action="store_true", help="Disable ANSI color output"
-    )
+    _add_global_flags(parser, suppress_defaults=False)
 
     # Shared flags accepted before OR after any subcommand. The subparser
     # copies use default=argparse.SUPPRESS so an explicit root-level value
     # (e.g. `agy-usage --json limits`) survives namespace merging instead of
     # being clobbered by the subparser's own defaults.
     common = argparse.ArgumentParser(add_help=False)
-    common_dir_group = common.add_argument_group("Data Source Options")
-    common_dir_mx = common_dir_group.add_mutually_exclusive_group()
-    common_dir_mx.add_argument(
-        "--dir",
-        dest="custom_dir",
-        metavar="PATH",
-        default=argparse.SUPPRESS,
-        help="Custom directory containing Antigravity conversation SQLite databases",
-    )
-    common_dir_mx.add_argument(
-        "--cli-only",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Scan Antigravity CLI conversations directory only",
-    )
-    common_dir_mx.add_argument(
-        "--ide-only",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help="Scan Antigravity IDE conversations directory only",
-    )
-    common_out_group = common.add_argument_group("Output Formatting")
-    common_out_group.add_argument(
-        "--json", action="store_true", default=argparse.SUPPRESS, help="Output results as JSON"
-    )
-    common_out_group.add_argument(
-        "--csv", action="store_true", default=argparse.SUPPRESS, help="Output session summaries as CSV"
-    )
-    common_out_group.add_argument(
-        "--no-color", action="store_true", default=argparse.SUPPRESS, help="Disable ANSI color output"
-    )
+    _add_global_flags(common, suppress_defaults=True)
 
     # Subcommands
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to run")
@@ -282,88 +304,14 @@ Examples:
         "limits", help="Show current 5-hour rolling limit and weekly quota limits",
         parents=[common],
     )
-    sub_limits.add_argument(
-        "--tier",
-        choices=["pro", "ultra", "free"],
-        default=None,
-        help="Antigravity subscription plan tier (default: auto-detect from the server, else pro)",
-    )
-    sub_limits.add_argument(
-        "--5h-limit",
-        "--five-hour-limit",
-        dest="five_h_limit",
-        help="Custom Gemini 5-hour limit in tokens (e.g. 50M, 100M)",
-    )
-    sub_limits.add_argument(
-        "--weekly-limit",
-        dest="weekly_limit",
-        help="Custom Gemini weekly limit in tokens (e.g. 250M, 750M)",
-    )
-    sub_limits.add_argument(
-        "--argon-weekly-limit",
-        dest="argon_weekly_limit",
-        help="Custom Gemini 4 Argon weekly limit in tokens (e.g. 25M, 50M)",
-    )
-    sub_limits.add_argument(
-        "--argon-remaining-pct",
-        dest="argon_remaining_pct",
-        type=float,
-        help="Calibrate Argon weekly cap from the 'Remaining %%' shown in Antigravity UI",
-    )
-    sub_limits.add_argument(
-        "--claude-5h-limit",
-        dest="claude_five_h_limit",
-        help="Custom Claude 5-hour limit in tokens (e.g. 25M)",
-    )
-    sub_limits.add_argument(
-        "--claude-weekly-limit",
-        dest="claude_weekly_limit",
-        help="Custom Claude weekly limit in tokens (e.g. 150M)",
-    )
+    _add_limit_flags(sub_limits)
 
     # 11. statusline
     sub_statusline = subparsers.add_parser(
         "statusline", help="Compact single-line quota status for shell prompt or tmux",
         parents=[common],
     )
-    sub_statusline.add_argument(
-        "--tier",
-        choices=["pro", "ultra", "free"],
-        default=None,
-        help="Antigravity subscription plan tier (default: auto-detect from the server, else pro)",
-    )
-    sub_statusline.add_argument(
-        "--5h-limit",
-        "--five-hour-limit",
-        dest="five_h_limit",
-        help="Custom Gemini 5-hour limit in tokens (e.g. 50M, 100M)",
-    )
-    sub_statusline.add_argument(
-        "--weekly-limit",
-        dest="weekly_limit",
-        help="Custom Gemini weekly limit in tokens (e.g. 250M, 750M)",
-    )
-    sub_statusline.add_argument(
-        "--argon-weekly-limit",
-        dest="argon_weekly_limit",
-        help="Custom Gemini 4 Argon weekly limit in tokens (e.g. 25M, 50M)",
-    )
-    sub_statusline.add_argument(
-        "--argon-remaining-pct",
-        dest="argon_remaining_pct",
-        type=float,
-        help="Calibrate Argon weekly cap from the 'Remaining %%' shown in Antigravity UI",
-    )
-    sub_statusline.add_argument(
-        "--claude-5h-limit",
-        dest="claude_five_h_limit",
-        help="Custom Claude 5-hour limit in tokens (e.g. 25M)",
-    )
-    sub_statusline.add_argument(
-        "--claude-weekly-limit",
-        dest="claude_weekly_limit",
-        help="Custom Claude weekly limit in tokens (e.g. 150M)",
-    )
+    _add_limit_flags(sub_statusline)
     sub_statusline.add_argument(
         "-s",
         "--short",

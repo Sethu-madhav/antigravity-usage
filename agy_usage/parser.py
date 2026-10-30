@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
@@ -250,6 +251,418 @@ def _fill_missing_step_timestamps(
     return result
 
 
+_DEFAULT_MODEL = "gemini-3.8-flash"
+# Errors a single parse stage or row may raise; the stage is skipped, the session kept.
+_ROW_ERRORS = (
+    sqlite3.DatabaseError,
+    ValueError,
+    TypeError,
+    KeyError,
+    IndexError,
+    OverflowError,
+    UnicodeDecodeError,
+)
+_UUID_PREFIX_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
+)
+
+# (idx, timestamp or None, model, usage) for a step that carried token usage.
+_RawStep = Tuple[int, Optional[datetime], str, TokenUsage]
+
+
+@dataclass
+class _ParseState:
+    """Everything parsed from one session DB so far.
+
+    Parsed state lives outside the stage helpers so any failure can still be
+    reported as a partial summary instead of discarding prior work.
+    """
+
+    session_id: str
+    source: str
+    db_path: str
+    title: str
+    workspace: str = "Unknown"
+    default_model: str = _DEFAULT_MODEL
+    known_models: Set[str] = field(default_factory=set)
+    step_to_model: Dict[int, str] = field(default_factory=dict)
+    enum_to_model: Dict[int, str] = field(default_factory=lambda: dict(KNOWN_MODEL_ENUMS))
+    model_token_totals: Dict[str, int] = field(default_factory=dict)
+    steps: List[StepRecord] = field(default_factory=list)
+    usage: TokenUsage = field(default_factory=TokenUsage)
+    start_time_blob: Optional[datetime] = None
+    first_ts: Optional[datetime] = None
+    last_ts: Optional[datetime] = None
+    validated: bool = False
+
+    def build_summary(self) -> SessionSummary:
+        """Assemble a summary from everything parsed so far."""
+        # Order models by token volume descending so primary_model
+        # (models[0]) is the dominant model of the session.
+        if self.known_models:
+            models_list = sorted(
+                self.known_models,
+                key=lambda m: (-self.model_token_totals.get(m, 0), m),
+            )
+        else:
+            models_list = [self.default_model]
+        return SessionSummary(
+            session_id=self.session_id,
+            source=self.source,
+            file_path=self.db_path,
+            title=self.title,
+            workspace=self.workspace,
+            models=models_list,
+            start_time=self.first_ts,
+            end_time=self.last_ts or self.first_ts,
+            step_count=len(self.steps),
+            usage=self.usage,
+            steps=self.steps,
+        )
+
+
+def _apply_workspace_uris(blob: bytes, state: _ParseState) -> None:
+    """Set state.workspace from each workspace URI (sub-field 1) in `blob`; the last one wins."""
+    for sf, sw, sv in parse_proto_fields(blob):
+        if sf == 1 and isinstance(sv, bytes):
+            uri_str = sv.decode("utf-8", errors="ignore")
+            if uri_str.startswith("file://"):
+                state.workspace = os.path.basename(uri_str.replace("file://", "").rstrip("/"))
+            elif uri_str:
+                state.workspace = uri_str
+
+
+def _read_trajectory_meta(cursor: sqlite3.Cursor, tables: Set[str], state: _ParseState) -> None:
+    """Stage 1: workspace and start time from trajectory_metadata_blob."""
+    if "trajectory_metadata_blob" not in tables:
+        return
+    try:
+        cursor.execute(
+            "SELECT data FROM trajectory_metadata_blob WHERE data IS NOT NULL LIMIT 1"
+        )
+        row = cursor.fetchone()
+        if row and row[0]:
+            for fnum, wtype, val in parse_proto_fields(row[0]):
+                if fnum == 1 and isinstance(val, bytes):
+                    _apply_workspace_uris(val, state)
+                elif fnum == 2 and isinstance(val, bytes):
+                    ts = parse_timestamp_proto(val)
+                    if ts:
+                        state.start_time_blob = ts
+    except _ROW_ERRORS as exc:
+        logger.debug("Skipping trajectory_metadata_blob in %s: %s", state.db_path, exc)
+
+
+def _decode_text(value: bytes) -> str:
+    return value.decode("utf-8", errors="ignore").strip()
+
+
+def _decode_key_value(data: bytes) -> Tuple[str, str]:
+    """Decode a {1: key, 2: value} string message (gen_metadata field 20)."""
+    fields = {sf: sv for sf, sw, sv in parse_proto_fields(data) if isinstance(sv, bytes)}
+    return _decode_text(fields.get(1, b"")), _decode_text(fields.get(2, b""))
+
+
+def _decode_gen_metadata_row(
+    data: bytes, known_models: Set[str]
+) -> Tuple[str, Optional[int], str, int]:
+    """Decode one gen_metadata blob into (model_name, model_enum_num, model_enum_raw, last_step_idx).
+
+    Valid model names are added to known_models as soon as they are seen, so
+    they survive a later field of the same row raising.
+    """
+    model_name = ""
+    model_enum_num: Optional[int] = None
+    model_enum_raw = ""
+    last_step_idx = -1
+    for gf, gw, gv in parse_proto_fields(data):
+        if not (gf == 1 and isinstance(gv, bytes)):
+            continue
+        for f1_f, f1_w, f1_v in parse_proto_fields(gv):
+            if f1_f == 19 and isinstance(f1_v, bytes):
+                m_str = normalize_model_name(_decode_text(f1_v))
+                # Placeholders (M-prefixed) and digit artifacts are not model
+                # names; letting them seed known_models / enum_to_model is the
+                # phantom-attribution failure described in BUG-010.
+                if m_str and not m_str.startswith("M") and not m_str.isdigit():
+                    model_name = m_str
+                    known_models.add(m_str)
+            elif f1_f == 20 and isinstance(f1_v, bytes):
+                key_str, val_str = _decode_key_value(f1_v)
+                if key_str == "last_step_index" and val_str.isdigit():
+                    last_step_idx = int(val_str)
+                elif key_str == "model_enum" and val_str:
+                    model_enum_raw = val_str.replace("MODEL_PLACEHOLDER_", "")
+                    num_str = model_enum_raw.lstrip("Mm")
+                    if num_str.isdigit():
+                        model_enum_num = int(num_str)
+    return model_name, model_enum_num, model_enum_raw, last_step_idx
+
+
+def _read_gen_metadata(cursor: sqlite3.Cursor, tables: Set[str], state: _ParseState) -> None:
+    """Stage 2: models and the step-to-model mapping from gen_metadata."""
+    if "gen_metadata" not in tables:
+        return
+    gm_rows: List[Tuple[int, str, Optional[int]]] = []
+    try:
+        cursor.execute("SELECT idx, data FROM gen_metadata WHERE size > 0 ORDER BY idx ASC")
+        for row_idx, data in cursor.fetchall():
+            if not data:
+                continue
+            model_name, model_enum_num, model_enum_raw, last_step_idx = (
+                _decode_gen_metadata_row(data, state.known_models)
+            )
+            if model_name and model_enum_num is not None:
+                state.enum_to_model[model_enum_num] = model_name
+                state.enum_to_model[1000 + model_enum_num] = model_name
+
+            gm_rows.append((last_step_idx, model_name or model_enum_raw, model_enum_num))
+
+        # Second pass so rows that only recorded model_enum (without field 19)
+        # inherit the human-readable model name discovered in the same session.
+        for last_step_idx, raw_name, enum_num in gm_rows:
+            resolved = raw_name
+            # Bare enum numbers ("MODEL_PLACEHOLDER_33") are keys,
+            # not names — let the enum mapping resolve them the same
+            # way M-prefixed placeholders are resolved.
+            if (
+                not resolved or resolved.startswith("M") or resolved.isdigit()
+            ) and enum_num is not None:
+                resolved = state.enum_to_model.get(enum_num, resolved)
+            resolved = normalize_model_name(resolved)
+            # BUG-010: a gen_metadata row earns an entry in
+            # known_models and an attribution anchor only when its
+            # model name fully resolves; unresolvable names (empty,
+            # M-placeholder, bare enum number) must never fabricate
+            # the hardcoded default into the model distribution.
+            if resolved and not resolved.startswith("M") and not resolved.isdigit():
+                state.known_models.add(resolved)
+                if last_step_idx >= 0:
+                    state.step_to_model[last_step_idx] = resolved
+                    state.step_to_model[last_step_idx + 1] = resolved
+    except _ROW_ERRORS as exc:
+        logger.debug("Skipping gen_metadata in %s: %s", state.db_path, exc)
+
+
+def _title_from_prompt_fields(payload_rows: List[tuple]) -> Optional[str]:
+    """Title from the structured user prompt (Field 19 -> SubField 2), if any."""
+    for s_idx, stype, payload in payload_rows:
+        for f, t, v in parse_proto_fields(payload):
+            if not (f == 19 and t == 2 and isinstance(v, bytes)):
+                continue
+            for sf, st, sv in parse_proto_fields(v):
+                if sf == 2 and st == 2 and isinstance(sv, bytes):
+                    txt = sv.decode("utf-8", errors="ignore").strip()
+                    if len(txt) > 3 and not txt.startswith("/Users/"):
+                        clean = txt.replace("/goal", "").strip()
+                        found = clean.replace("\n", " ")[:60]
+                        if found:
+                            return found
+                        break
+    return None
+
+
+def _title_from_strings(payload_rows: List[tuple]) -> Optional[str]:
+    """Fallback title: the first plausible printable string in the payloads."""
+    for s_idx, stype, payload in payload_rows:
+        for s in extract_string_candidates(payload, min_len=4):
+            if _UUID_PREFIX_RE.match(s):
+                continue
+            if s.startswith(("bot-", "sessionID", "file://", "MODEL_", "allow", "b$", "$")):
+                continue
+            if len(s) > 8 and not s.isdigit() and not s.startswith(("/Users/", ")/Users/", "3/Users/")):
+                clean = s.replace("/goal", "").strip().replace("\n", " ")
+                if len(clean) > 5:
+                    return clean[:60]
+    return None
+
+
+def _extract_title(cursor: sqlite3.Cursor, db_path: str) -> Optional[str]:
+    """Stage 3: session title from the initial steps, or None if none is found."""
+    try:
+        cursor.execute(
+            "SELECT idx, step_type, step_payload FROM steps WHERE idx IN (1, 0, 2, 3) AND step_payload IS NOT NULL ORDER BY idx ASC"
+        )
+        payload_rows = cursor.fetchall()
+        return _title_from_prompt_fields(payload_rows) or _title_from_strings(payload_rows)
+    except _ROW_ERRORS as exc:
+        logger.debug("Skipping title extraction in %s: %s", db_path, exc)
+        return None
+
+
+class _StepRowStream:
+    """Yield (idx, metadata) rows straight from the cursor.
+
+    Rows are streamed instead of fetchall()-ed so metadata blobs are never all
+    held in memory at once. A SQLite error, whether at execute or part-way
+    through the read, ends the stream and sets `failed`; the caller then
+    discards every step read so far, exactly as a failed fetchall() produced
+    no rows at all.
+    """
+
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        self._cursor = cursor
+        self.failed = False
+
+    def __iter__(self):
+        try:
+            self._cursor.execute(
+                "SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC"
+            )
+            yield from self._cursor
+        except sqlite3.DatabaseError:
+            # Locked/corrupt/vanished mid-read: keep title, workspace and any
+            # steps already collected instead of dropping the whole session.
+            self.failed = True
+
+
+def _resolve_step_model(
+    idx: int,
+    usage_raw: bytes,
+    state: _ParseState,
+    gm_anchors: List[Tuple[int, str]],
+    gm_anchor_positions: List[int],
+) -> str:
+    """Identify the model for a step:
+
+    1) Direct gen_metadata last_step_index anchor
+    2) UsageMetadata field 1 model_enum integer
+    3) Most recent preceding gen_metadata anchor in this session
+    4) Session default model
+    """
+    step_model = state.step_to_model.get(idx, "")
+    if not step_model:
+        u_enum = extract_usage_model_enum(usage_raw)
+        if u_enum is not None and u_enum in state.enum_to_model:
+            step_model = state.enum_to_model[u_enum]
+    if not step_model and gm_anchors:
+        anchor_pos = bisect.bisect_right(gm_anchor_positions, idx) - 1
+        if anchor_pos >= 0:
+            step_model = gm_anchors[anchor_pos][1]
+    if not step_model:
+        step_model = state.default_model
+    return step_model
+
+
+def _parse_step_row(
+    idx: int,
+    meta_blob: bytes,
+    state: _ParseState,
+    gm_anchors: List[Tuple[int, str]],
+    gm_anchor_positions: List[int],
+) -> Optional[_RawStep]:
+    """Parse one step's metadata; None if it carries no usage."""
+    meta_map: Dict[int, bytes | int] = {f: v for f, w, v in parse_proto_fields(meta_blob)}
+
+    # Check for UsageMetadata in Field 9
+    usage_raw = meta_map.get(9)
+    if not isinstance(usage_raw, bytes):
+        return None
+
+    step_usage = parse_usage_proto(usage_raw)
+    # Ignore empty usage steps
+    if step_usage.total_tokens == 0:
+        return None
+
+    # Extract Step Timestamp from Field 1, 6, 7, 8, or 32
+    step_ts: Optional[datetime] = None
+    for ts_field_id in (1, 6, 7, 8, 32):
+        ts_raw = meta_map.get(ts_field_id)
+        if isinstance(ts_raw, bytes):
+            ts = parse_timestamp_proto(ts_raw)
+            if ts:
+                step_ts = ts
+                break
+
+    step_model = _resolve_step_model(idx, usage_raw, state, gm_anchors, gm_anchor_positions)
+    return idx, step_ts, step_model, step_usage
+
+
+def _read_steps(
+    cursor: sqlite3.Cursor,
+    db_path: str,
+    state: _ParseState,
+    gm_anchors: List[Tuple[int, str]],
+    gm_anchor_positions: List[int],
+) -> None:
+    """Stage 4: step records and aggregated token usage."""
+    stream = _StepRowStream(cursor)
+
+    try:
+        db_mtime: Optional[datetime] = datetime.fromtimestamp(os.path.getmtime(db_path))
+    except (OSError, OverflowError, ValueError):
+        db_mtime = None
+
+    # BUG-018: Collect raw steps without immediately falling back to db_mtime
+    raw_steps: List[_RawStep] = []
+
+    for idx, meta_blob in stream:
+        # A corrupt BLOB column can hold any SQLite type (dynamic typing).
+        if meta_blob is None or meta_blob == b"":
+            continue
+        if not isinstance(meta_blob, (bytes, bytearray, memoryview)):
+            logger.debug(
+                "Skipping step idx=%r in %s: non-bytes metadata (%s)",
+                idx,
+                db_path,
+                type(meta_blob).__name__,
+            )
+            continue
+        meta_blob = bytes(meta_blob)
+        try:
+            # BUG-018: Record step candidate without immediate db_mtime fallback;
+            # missing timestamps will be filled via neighbour inference below.
+            raw_step = _parse_step_row(idx, meta_blob, state, gm_anchors, gm_anchor_positions)
+        except _ROW_ERRORS as exc:
+            # One malformed row must not discard the rest of the session
+            logger.debug("Skipping malformed step idx=%r in %s: %s", idx, db_path, exc)
+            continue
+        if raw_step is not None:
+            raw_steps.append(raw_step)
+
+    if stream.failed:
+        raw_steps.clear()
+
+    # BUG-018: Fill missing timestamps using nearest neighbour inference.
+    # If no steps have timestamps, fall back to start_time_blob, or min(db_mtime, now).
+    session_fallback: Optional[datetime] = None
+    if state.start_time_blob is not None:
+        session_fallback = state.start_time_blob
+    elif db_mtime is not None:
+        session_fallback = min(db_mtime, datetime.now())
+
+    filled_timestamps = _fill_missing_step_timestamps(
+        [ts for _, ts, _, _ in raw_steps], fallback=session_fallback
+    )
+
+    for (idx, _, step_model, step_usage), final_ts in zip(raw_steps, filled_timestamps):
+        if final_ts is None:
+            # No timestamp could be inferred; drop the step
+            continue
+
+        # Build everything that can raise before mutating any state, so
+        # `steps` and `usage` never drift apart.
+        new_usage = state.usage.add(step_usage)
+        step_rec = StepRecord(
+            step_idx=idx,
+            timestamp=final_ts,
+            model=step_model,
+            usage=step_usage,
+        )
+
+        if state.first_ts is None or final_ts < state.first_ts:
+            state.first_ts = final_ts
+        if state.last_ts is None or final_ts > state.last_ts:
+            state.last_ts = final_ts
+
+        state.known_models.add(step_model)
+        state.model_token_totals[step_model] = (
+            state.model_token_totals.get(step_model, 0) + step_usage.total_tokens
+        )
+        state.steps.append(step_rec)
+        state.usage = new_usage
+
+
 class AntigravityParser:
     """Parser to discover and extract Antigravity conversation databases."""
 
@@ -375,45 +788,12 @@ class AntigravityParser:
 
         filename = os.path.basename(db_path)
         session_id = filename.replace(".db", "")
-
-        # Parsed state lives outside the try so any failure below can still be
-        # reported as a partial summary instead of discarding prior work.
-        workspace = "Unknown"
-        title = f"Session {session_id[:8]}"
-        known_models: Set[str] = set()
-        step_to_model: Dict[int, str] = {}
-        default_model = "gemini-3.8-flash"
-        steps: List[StepRecord] = []
-        aggregated_usage = TokenUsage()
-        model_token_totals: Dict[str, int] = {}
-        first_ts: Optional[datetime] = None
-        last_ts: Optional[datetime] = None
-        validated = False
-
-        def build_summary() -> SessionSummary:
-            """Assemble a summary from everything parsed so far."""
-            # Order models by token volume descending so primary_model
-            # (models[0]) is the dominant model of the session.
-            if known_models:
-                models_list = sorted(
-                    known_models,
-                    key=lambda m: (-model_token_totals.get(m, 0), m),
-                )
-            else:
-                models_list = [default_model]
-            return SessionSummary(
-                session_id=session_id,
-                source=source,
-                file_path=db_path,
-                title=title,
-                workspace=workspace,
-                models=models_list,
-                start_time=first_ts,
-                end_time=last_ts or first_ts,
-                step_count=len(steps),
-                usage=aggregated_usage,
-                steps=steps,
-            )
+        state = _ParseState(
+            session_id=session_id,
+            source=source,
+            db_path=db_path,
+            title=f"Session {session_id[:8]}",
+        )
 
         conn: Optional[sqlite3.Connection] = None
         try:
@@ -432,383 +812,37 @@ class AntigravityParser:
             tables = {row[0] for row in cursor.fetchall()}
             if "steps" not in tables:
                 return None, False
-            validated = True
+            state.validated = True
 
-            # 1. Extract Workspace / Project from trajectory_metadata_blob
-            start_time_blob: Optional[datetime] = None
-            if "trajectory_metadata_blob" in tables:
-                try:
-                    cursor.execute(
-                        "SELECT data FROM trajectory_metadata_blob WHERE data IS NOT NULL LIMIT 1"
-                    )
-                    row = cursor.fetchone()
-                    if row and row[0]:
-                        blob_fields = parse_proto_fields(row[0])
-                        for fnum, wtype, val in blob_fields:
-                            if fnum == 1 and isinstance(val, bytes):
-                                sub = parse_proto_fields(val)
-                                for sf, sw, sv in sub:
-                                    if sf == 1 and isinstance(sv, bytes):
-                                        uri_str = sv.decode("utf-8", errors="ignore")
-                                        if uri_str.startswith("file://"):
-                                            workspace = os.path.basename(
-                                                uri_str.replace("file://", "").rstrip("/")
-                                            )
-                                        elif uri_str:
-                                            workspace = uri_str
-                            elif fnum == 2 and isinstance(val, bytes):
-                                ts = parse_timestamp_proto(val)
-                                if ts:
-                                    start_time_blob = ts
-                except (
-                    sqlite3.DatabaseError,
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    IndexError,
-                    OverflowError,
-                    UnicodeDecodeError,
-                ) as exc:
-                    logger.debug(
-                        "Skipping trajectory_metadata_blob in %s: %s", db_path, exc
-                    )
-
+            _read_trajectory_meta(cursor, tables, state)
             # Keep the blob start time for partial summaries: a failure in any
             # later stage must not lose the only timestamp already parsed.
-            first_ts = start_time_blob
+            state.first_ts = state.start_time_blob
 
-            # 2. Extract Models and Step-to-Model Mapping from gen_metadata
-            enum_to_model: Dict[int, str] = dict(KNOWN_MODEL_ENUMS)
-            gm_rows: List[Tuple[int, str, Optional[int]]] = []
-            if "gen_metadata" in tables:
-                try:
-                    cursor.execute("SELECT idx, data FROM gen_metadata WHERE size > 0 ORDER BY idx ASC")
-                    for row_idx, data in cursor.fetchall():
-                        if not data:
-                            continue
-                        g_fields = parse_proto_fields(data)
-                        model_name = ""
-                        model_enum_num: Optional[int] = None
-                        model_enum_raw = ""
-                        last_step_idx = -1
-                        for gf, gw, gv in g_fields:
-                            if gf == 1 and isinstance(gv, bytes):
-                                f1_fields = parse_proto_fields(gv)
-                                for f1_f, f1_w, f1_v in f1_fields:
-                                    if f1_f == 19 and isinstance(f1_v, bytes):
-                                        m_str = normalize_model_name(
-                                            f1_v.decode("utf-8", errors="ignore").strip()
-                                        )
-                                        # Placeholders (M-prefixed) and digit
-                                        # artifacts are not model names; letting
-                                        # them seed known_models / enum_to_model
-                                        # is the phantom-attribution failure
-                                        # described in BUG-010.
-                                        if (
-                                            m_str
-                                            and not m_str.startswith("M")
-                                            and not m_str.isdigit()
-                                        ):
-                                            model_name = m_str
-                                            known_models.add(m_str)
-                                    elif f1_f == 20 and isinstance(f1_v, bytes):
-                                        f20_fields = parse_proto_fields(f1_v)
-                                        f20_map = {
-                                            sf: sv
-                                            for sf, sw, sv in f20_fields
-                                            if isinstance(sv, bytes)
-                                        }
-                                        key_str = (
-                                            f20_map.get(1, b"")
-                                            .decode("utf-8", errors="ignore")
-                                            .strip()
-                                        )
-                                        val_str = (
-                                            f20_map.get(2, b"")
-                                            .decode("utf-8", errors="ignore")
-                                            .strip()
-                                        )
-                                        if key_str == "last_step_index" and val_str.isdigit():
-                                            last_step_idx = int(val_str)
-                                        elif key_str == "model_enum" and val_str:
-                                            model_enum_raw = val_str.replace("MODEL_PLACEHOLDER_", "")
-                                            num_str = model_enum_raw.lstrip("Mm")
-                                            if num_str.isdigit():
-                                                model_enum_num = int(num_str)
-
-                        if model_name and model_enum_num is not None:
-                            enum_to_model[model_enum_num] = model_name
-                            enum_to_model[1000 + model_enum_num] = model_name
-
-                        gm_rows.append((last_step_idx, model_name or model_enum_raw, model_enum_num))
-
-                    # Second pass so rows that only recorded model_enum (without field 19)
-                    # inherit the human-readable model name discovered in the same session.
-                    for last_step_idx, raw_name, enum_num in gm_rows:
-                        resolved = raw_name
-                        # Bare enum numbers ("MODEL_PLACEHOLDER_33") are keys,
-                        # not names — let the enum mapping resolve them the same
-                        # way M-prefixed placeholders are resolved.
-                        if (
-                            not resolved or resolved.startswith("M") or resolved.isdigit()
-                        ) and enum_num is not None:
-                            resolved = enum_to_model.get(enum_num, resolved)
-                        resolved = normalize_model_name(resolved)
-                        # BUG-010: a gen_metadata row earns an entry in
-                        # known_models and an attribution anchor only when its
-                        # model name fully resolves; unresolvable names (empty,
-                        # M-placeholder, bare enum number) must never fabricate
-                        # the hardcoded default into the model distribution.
-                        if resolved and not resolved.startswith("M") and not resolved.isdigit():
-                            known_models.add(resolved)
-                            if last_step_idx >= 0:
-                                step_to_model[last_step_idx] = resolved
-                                step_to_model[last_step_idx + 1] = resolved
-                except (
-                    sqlite3.DatabaseError,
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    IndexError,
-                    OverflowError,
-                    UnicodeDecodeError,
-                ) as exc:
-                    logger.debug("Skipping gen_metadata in %s: %s", db_path, exc)
-
+            _read_gen_metadata(cursor, tables, state)
             gm_anchors: List[Tuple[int, str]] = sorted(
                 (idx_anchor, m_name)
-                for idx_anchor, m_name in step_to_model.items()
+                for idx_anchor, m_name in state.step_to_model.items()
                 if m_name
             )
-
             # Positions of gm_anchors, for bisecting the nearest preceding anchor.
             gm_anchor_positions: List[int] = [a_idx for a_idx, _ in gm_anchors]
-
-            default_model = (
-                sorted(list(known_models))[0]
-                if known_models
-                else "gemini-3.8-flash"
+            state.default_model = (
+                min(state.known_models) if state.known_models else _DEFAULT_MODEL
             )
 
-            # 3. Extract Session Title from initial steps
-            title = f"Session {session_id[:8]}"
-            try:
-                cursor.execute(
-                    "SELECT idx, step_type, step_payload FROM steps WHERE idx IN (1, 0, 2, 3) AND step_payload IS NOT NULL ORDER BY idx ASC"
-                )
-                payload_rows = cursor.fetchall()
-                found_title = None
+            found_title = _extract_title(cursor, db_path)
+            if found_title:
+                state.title = found_title
 
-                # Pass 1: Look for structured user prompt (Field 19 -> SubField 2)
-                for s_idx, stype, payload in payload_rows:
-                    for f, t, v in parse_proto_fields(payload):
-                        if f == 19 and t == 2 and isinstance(v, bytes):
-                            sub = parse_proto_fields(v)
-                            for sf, st, sv in sub:
-                                if sf == 2 and st == 2 and isinstance(sv, bytes):
-                                    txt = sv.decode("utf-8", errors="ignore").strip()
-                                    if len(txt) > 3 and not txt.startswith("/Users/"):
-                                        clean = txt.replace("/goal", "").strip()
-                                        found_title = clean.replace("\n", " ")[:60]
-                                        break
-                            if found_title:
-                                break
-                    if found_title:
-                        break
-
-                # Pass 2: Fallback to string search if no structured user prompt was found
-                if not found_title:
-                    for s_idx, stype, payload in payload_rows:
-                        strs = extract_string_candidates(payload, min_len=4)
-                        for s in strs:
-                            if re.match(
-                                r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-                                s,
-                                re.I,
-                            ):
-                                continue
-                            if s.startswith(("bot-", "sessionID", "file://", "MODEL_", "allow", "b$", "$")):
-                                continue
-                            if len(s) > 8 and not s.isdigit() and not s.startswith(("/Users/", ")/Users/", "3/Users/")):
-                                clean = s.replace("/goal", "").strip().replace("\n", " ")
-                                if len(clean) > 5:
-                                    found_title = clean[:60]
-                                    break
-                        if found_title:
-                            break
-
-                if found_title:
-                    title = found_title
-            except (
-                sqlite3.DatabaseError,
-                ValueError,
-                TypeError,
-                KeyError,
-                IndexError,
-                OverflowError,
-                UnicodeDecodeError,
-            ) as exc:
-                logger.debug("Skipping title extraction in %s: %s", db_path, exc)
-
-            # 4. Extract Step Records and Token Usage
-            step_read_failed = False
-
-            def iter_step_rows():
-                """Yield (idx, metadata) rows straight from the cursor.
-
-                Rows are streamed instead of fetchall()-ed so metadata blobs are
-                never all held in memory at once. A SQLite error, whether at
-                execute or part-way through the read, ends the stream and sets
-                step_read_failed; the caller then discards every step read so
-                far, exactly as a failed fetchall() produced no rows at all.
-                """
-                nonlocal step_read_failed
-                try:
-                    cursor.execute(
-                        "SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC"
-                    )
-                    yield from cursor
-                except sqlite3.DatabaseError:
-                    # Locked/corrupt/vanished mid-read: keep title, workspace and any
-                    # steps already collected instead of dropping the whole session.
-                    step_read_failed = True
-
-            try:
-                db_mtime: Optional[datetime] = datetime.fromtimestamp(
-                    os.path.getmtime(db_path)
-                )
-            except (OSError, OverflowError, ValueError):
-                db_mtime = None
-
-            # BUG-018: Collect raw steps without immediately falling back to db_mtime
-            raw_steps: List[Tuple[int, Optional[datetime], str, TokenUsage]] = []
-
-            for idx, meta_blob in iter_step_rows():
-                # A corrupt BLOB column can hold any SQLite type (dynamic typing).
-                if meta_blob is None or meta_blob == b"":
-                    continue
-                if not isinstance(meta_blob, (bytes, bytearray, memoryview)):
-                    logger.debug(
-                        "Skipping step idx=%r in %s: non-bytes metadata (%s)",
-                        idx,
-                        db_path,
-                        type(meta_blob).__name__,
-                    )
-                    continue
-                meta_blob = bytes(meta_blob)
-                try:
-                    meta_fields = parse_proto_fields(meta_blob)
-                    meta_map: Dict[int, bytes | int] = {
-                        f: v for f, w, v in meta_fields
-                    }
-
-                    # Check for UsageMetadata in Field 9
-                    usage_raw = meta_map.get(9)
-                    if not isinstance(usage_raw, bytes):
-                        continue
-
-                    step_usage = parse_usage_proto(usage_raw)
-                    # Ignore empty usage steps
-                    if step_usage.total_tokens == 0:
-                        continue
-
-                    # Extract Step Timestamp from Field 1, 6, 7, 8, or 32
-                    step_ts: Optional[datetime] = None
-                    for ts_field_id in (1, 6, 7, 8, 32):
-                        ts_raw = meta_map.get(ts_field_id)
-                        if isinstance(ts_raw, bytes):
-                            ts = parse_timestamp_proto(ts_raw)
-                            if ts:
-                                step_ts = ts
-                                break
-
-                    # Identify Model for this step:
-                    # 1) Direct gen_metadata last_step_index anchor
-                    # 2) UsageMetadata field 1 model_enum integer
-                    # 3) Most recent preceding gen_metadata anchor in this session
-                    # 4) Session default model
-                    step_model = step_to_model.get(idx, "")
-                    if not step_model:
-                        u_enum = extract_usage_model_enum(usage_raw)
-                        if u_enum is not None and u_enum in enum_to_model:
-                            step_model = enum_to_model[u_enum]
-                    if not step_model and gm_anchors:
-                        anchor_pos = bisect.bisect_right(gm_anchor_positions, idx) - 1
-                        if anchor_pos >= 0:
-                            step_model = gm_anchors[anchor_pos][1]
-                    if not step_model:
-                        step_model = default_model
-
-                    # BUG-018: Record step candidate without immediate db_mtime fallback;
-                    # missing timestamps will be filled via neighbour inference below.
-                    raw_steps.append((idx, step_ts, step_model, step_usage))
-                except (
-                    ValueError,
-                    TypeError,
-                    KeyError,
-                    IndexError,
-                    OverflowError,
-                    UnicodeDecodeError,
-                    sqlite3.DatabaseError,
-                ) as exc:
-                    # One malformed row must not discard the rest of the session
-                    logger.debug(
-                        "Skipping malformed step idx=%r in %s: %s", idx, db_path, exc
-                    )
-                    continue
-
-            if step_read_failed:
-                raw_steps.clear()
-
-            # BUG-018: Fill missing timestamps using nearest neighbour inference.
-            # If no steps have timestamps, fall back to start_time_blob, or min(db_mtime, now).
-            session_fallback: Optional[datetime] = None
-            if start_time_blob is not None:
-                session_fallback = start_time_blob
-            elif db_mtime is not None:
-                session_fallback = min(db_mtime, datetime.now())
-
-            raw_timestamps = [ts for _, ts, _, _ in raw_steps]
-            filled_timestamps = _fill_missing_step_timestamps(
-                raw_timestamps, fallback=session_fallback
-            )
-
-            for (idx, _, step_model, step_usage), final_ts in zip(
-                raw_steps, filled_timestamps
-            ):
-                if final_ts is None:
-                    # No timestamp could be inferred; drop the step
-                    continue
-
-                # Build everything that can raise before mutating any state, so
-                # `steps` and `aggregated_usage` never drift apart.
-                new_usage = aggregated_usage.add(step_usage)
-                step_rec = StepRecord(
-                    step_idx=idx,
-                    timestamp=final_ts,
-                    model=step_model,
-                    usage=step_usage,
-                )
-
-                if first_ts is None or final_ts < first_ts:
-                    first_ts = final_ts
-                if last_ts is None or final_ts > last_ts:
-                    last_ts = final_ts
-
-                known_models.add(step_model)
-                model_token_totals[step_model] = (
-                    model_token_totals.get(step_model, 0) + step_usage.total_tokens
-                )
-                steps.append(step_rec)
-                aggregated_usage = new_usage
-
-            return build_summary(), True
+            _read_steps(cursor, db_path, state, gm_anchors, gm_anchor_positions)
+            return state.build_summary(), True
 
         except sqlite3.DatabaseError:
             # SQLite failure after validation (locked, corrupt page, vanished
             # file): emit what we have so the session stays visible, unless the
             # DB was never validated as a usable session at all.
-            return (build_summary(), False) if validated else (None, False)
+            return (state.build_summary(), False) if state.validated else (None, False)
         except Exception:
             # Unknown failure: preserve the previous skip-the-session behavior.
             return None, False
