@@ -659,15 +659,27 @@ class AntigravityParser:
                 logger.debug("Skipping title extraction in %s: %s", db_path, exc)
 
             # 4. Extract Step Records and Token Usage
-            try:
-                cursor.execute(
-                    "SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC"
-                )
-                step_rows = cursor.fetchall()
-            except sqlite3.DatabaseError:
-                # Locked/corrupt/vanished mid-read: keep title, workspace and any
-                # steps already collected instead of dropping the whole session.
-                step_rows = []
+            step_read_failed = False
+
+            def iter_step_rows():
+                """Yield (idx, metadata) rows straight from the cursor.
+
+                Rows are streamed instead of fetchall()-ed so metadata blobs are
+                never all held in memory at once. A SQLite error, whether at
+                execute or part-way through the read, ends the stream and sets
+                step_read_failed; the caller then discards every step read so
+                far, exactly as a failed fetchall() produced no rows at all.
+                """
+                nonlocal step_read_failed
+                try:
+                    cursor.execute(
+                        "SELECT idx, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx ASC"
+                    )
+                    yield from cursor
+                except sqlite3.DatabaseError:
+                    # Locked/corrupt/vanished mid-read: keep title, workspace and any
+                    # steps already collected instead of dropping the whole session.
+                    step_read_failed = True
 
             try:
                 db_mtime: Optional[datetime] = datetime.fromtimestamp(
@@ -679,7 +691,7 @@ class AntigravityParser:
             # BUG-018: Collect raw steps without immediately falling back to db_mtime
             raw_steps: List[Tuple[int, Optional[datetime], str, TokenUsage]] = []
 
-            for idx, meta_blob in step_rows:
+            for idx, meta_blob in iter_step_rows():
                 # A corrupt BLOB column can hold any SQLite type (dynamic typing).
                 if meta_blob is None or meta_blob == b"":
                     continue
@@ -752,6 +764,9 @@ class AntigravityParser:
                         "Skipping malformed step idx=%r in %s: %s", idx, db_path, exc
                     )
                     continue
+
+            if step_read_failed:
+                raw_steps.clear()
 
             # BUG-018: Fill missing timestamps using nearest neighbour inference.
             # If no steps have timestamps, fall back to start_time_blob, or min(db_mtime, now).
