@@ -553,6 +553,41 @@ class LimitsCalculator:
         return items
 
     @staticmethod
+    def _partition_pool_items(
+        sessions: List[SessionSummary],
+    ) -> Dict[str, List[Tuple[datetime, TokenUsage, float, str]]]:
+        """Split sessions into chronological per-pool item lists, classifying each step once.
+
+        Equivalent to calling ``_collect_pool_items`` for "gemini", "argon" and "claude",
+        but walks the sessions a single time.
+        """
+        pools: Dict[str, List[Tuple[datetime, TokenUsage, float, str]]] = {
+            "gemini": [],
+            "argon": [],
+            "claude": [],
+        }
+        for s in sessions:
+            if s.steps:
+                for step in s.steps:
+                    st_ts = step.timestamp
+                    if st_ts.tzinfo:
+                        st_ts = st_ts.replace(tzinfo=None)
+                    pools[classify_model_pool(step.model)].append(
+                        (st_ts, step.usage, step.cost.total, s.session_id)
+                    )
+            else:
+                s_time = s.start_time or s.end_time
+                if s_time:
+                    s_ts = s_time.replace(tzinfo=None) if s_time.tzinfo else s_time
+                    pools[classify_model_pool(s.primary_model)].append(
+                        (s_ts, s.usage, s.cost.total, s.session_id)
+                    )
+
+        for items in pools.values():
+            items.sort(key=lambda x: x[0])
+        return pools
+
+    @staticmethod
     def _compute_cycle_window(
         items: List[Tuple[datetime, TokenUsage, float, str]],
         current_time: datetime,
@@ -829,8 +864,11 @@ class LimitsCalculator:
         if use_live_server and not live_synced:
             live_error = "; ".join(live_errors) or "server returned no quota buckets"
 
+        # OPT-005: classify every step once, then split into the three pools.
+        pool_items = LimitsCalculator._partition_pool_items(sessions)
+
         # 1. Gemini Flash / Pro Pool
-        gemini_items = LimitsCalculator._collect_pool_items(sessions, pool="gemini")
+        gemini_items = pool_items["gemini"]
         g5_custom = five_h_limit is not None and five_h_limit > 0
         g7_custom = weekly_limit is not None and weekly_limit > 0
         gemini_5h, gemini_7d = LimitsCalculator._compute_windows_from_items(
@@ -863,7 +901,7 @@ class LimitsCalculator:
             )
 
         # 2. Gemini 4 Argon Pool (weekly-only quota pool, no 5-hour window)
-        argon_items = LimitsCalculator._collect_pool_items(sessions, pool="argon")
+        argon_items = pool_items["argon"]
         ar_custom = (argon_weekly_limit is not None and argon_weekly_limit > 0) or (
             argon_remaining_pct is not None
         )
@@ -911,7 +949,7 @@ class LimitsCalculator:
             )
 
         # 3. Claude and GPT Partner Pool (5-hour + weekly quota pool)
-        claude_items = LimitsCalculator._collect_pool_items(sessions, pool="claude")
+        claude_items = pool_items["claude"]
         c5_custom = claude_five_h_limit is not None and claude_five_h_limit > 0
         c7_custom = claude_weekly_limit is not None and claude_weekly_limit > 0
         claude_5h, claude_7d = LimitsCalculator._compute_windows_from_items(
