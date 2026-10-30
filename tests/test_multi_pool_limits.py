@@ -54,6 +54,7 @@ class TestMultiPoolLimitsAndArgon(unittest.TestCase):
             tier_name="pro",
             argon_remaining_pct=80.0,  # 10M used = 20% -> 50M calibrated weekly limit
             now=ref_time,
+            use_live_server=False,  # IMP-006: fake /tmp/sp.db must not hit the live server
         )
 
         # Gemini pool should ONLY contain the 5M Gemini 3.8 Flash tokens

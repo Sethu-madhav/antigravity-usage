@@ -510,6 +510,17 @@ def fetch_live_quota_summary(
     return None
 
 
+def should_use_live_server(sessions: List[SessionSummary]) -> bool:
+    """Return True when local history cannot fully explain quota.
+
+    A device with no local history still asks: its quota may have been spent
+    on another device, which only the server knows about.
+    """
+    return not sessions or any(
+        bool(s.file_path and os.path.isfile(s.file_path)) for s in sessions
+    )
+
+
 class LimitsCalculator:
     """Calculates 5-hour and 7-day weekly quota cycle usage across Antigravity model pools."""
 
@@ -782,12 +793,8 @@ class LimitsCalculator:
 
         # Automatically query the live local Antigravity language_server when running
         # against real on-disk sessions (disabled automatically for synthetic unit tests).
-        # A device with no local history still asks: its quota may have been spent
-        # on another device, which only the server knows about.
         if use_live_server is None:
-            use_live_server = not sessions or any(
-                bool(s.file_path and os.path.isfile(s.file_path)) for s in sessions
-            )
+            use_live_server = should_use_live_server(sessions)
 
         live_errors: List[str] = []
         live_data = fetch_live_quota_summary(errors=live_errors) if use_live_server else None
