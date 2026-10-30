@@ -133,6 +133,20 @@ TIERS: Dict[str, TierConfig] = {
 }
 
 
+def tier_key_from_server_id(user_tier_id: Any) -> Optional[str]:
+    """Map a ``GetUserStatus`` ``userTier.id`` to a ``TIERS`` key, or None if unrecognised.
+
+    Only ``g1-pro-tier`` has been observed on a real server; the ultra and free
+    ids are assumed to follow the same ``<word>-tier`` shape, so match on the
+    dash-separated words and refuse anything ambiguous or unknown.
+    """
+    if not isinstance(user_tier_id, str):
+        return None
+    words = set(re.split(r"[^a-z0-9]+", user_tier_id.lower()))
+    matches = [key for key in TIERS if key in words]
+    return matches[0] if len(matches) == 1 else None
+
+
 @dataclass
 class WindowStats:
     """Usage statistics within a specific 5-hour or 7-day cycle window."""
@@ -251,6 +265,10 @@ class MultiPoolLimits:
     quota_source: str = "local"
     cache_fetched_at: Optional[datetime] = None
     cache_age_seconds: Optional[float] = None
+    # How the tier was chosen: "explicit" (caller named one), "auto" (read from
+    # the live server), or "default" (auto requested but the server gave no
+    # usable tier id, so pro was assumed).
+    tier_source: str = "explicit"
 
 
 def parse_token_amount(text: Optional[str]) -> Optional[int]:
@@ -811,7 +829,7 @@ class LimitsCalculator:
     @staticmethod
     def compute_all_pools(
         sessions: List[SessionSummary],
-        tier_name: str = "pro",
+        tier_name: Optional[str] = "pro",
         five_h_limit: Optional[int] = None,
         weekly_limit: Optional[int] = None,
         argon_weekly_limit: Optional[int] = None,
@@ -821,10 +839,15 @@ class LimitsCalculator:
         now: Optional[datetime] = None,
         use_live_server: Optional[bool] = None,
     ) -> MultiPoolLimits:
-        """Compute quota windows for Gemini (Flash/Pro), Argon (weekly-only), and Claude/GPT pools."""
+        """Compute quota windows for Gemini (Flash/Pro), Argon (weekly-only), and Claude/GPT pools.
+
+        ``tier_name=None`` asks for auto-detection from the live server's tier id;
+        pro is used when the server is unreachable or its id is not recognised.
+        """
         current_time = now or datetime.now()
-        tier_key = tier_name.lower().strip()
+        tier_key = (tier_name or "pro").lower().strip()
         tier = TIERS.get(tier_key, TIERS["pro"])
+        tier_source = "explicit" if tier_name is not None else "default"
 
         # Automatically query the live local Antigravity language_server when running
         # against real on-disk sessions (disabled automatically for synthetic unit tests).
@@ -835,6 +858,11 @@ class LimitsCalculator:
         live_data = fetch_live_quota_summary(errors=live_errors) if use_live_server else None
         live_buckets = (live_data or {}).get("buckets", {}) if live_data else {}
         from_cache = bool(live_data) and live_data.get("source") == "cached"
+        if tier_name is None and live_data and not from_cache:
+            detected = tier_key_from_server_id(live_data.get("user_tier_id"))
+            if detected:
+                tier = TIERS[detected]
+                tier_source = "auto"
         cache_fetched_at: Optional[datetime] = None
         cache_age_seconds: Optional[float] = None
         if from_cache:
@@ -997,6 +1025,7 @@ class LimitsCalculator:
             quota_source=quota_source,
             cache_fetched_at=cache_fetched_at,
             cache_age_seconds=cache_age_seconds,
+            tier_source=tier_source,
         )
 
 

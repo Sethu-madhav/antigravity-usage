@@ -281,8 +281,8 @@ Examples:
     sub_limits.add_argument(
         "--tier",
         choices=["pro", "ultra", "free"],
-        default="pro",
-        help="Antigravity subscription plan tier (default: pro)",
+        default=None,
+        help="Antigravity subscription plan tier (default: auto-detect from the server, else pro)",
     )
     sub_limits.add_argument(
         "--5h-limit",
@@ -325,8 +325,8 @@ Examples:
     sub_statusline.add_argument(
         "--tier",
         choices=["pro", "ultra", "free"],
-        default="pro",
-        help="Antigravity subscription plan tier (default: pro)",
+        default=None,
+        help="Antigravity subscription plan tier (default: auto-detect from the server, else pro)",
     )
     sub_statusline.add_argument(
         "--5h-limit",
@@ -1013,7 +1013,7 @@ def _parse_limit_arg(raw: Optional[str], flag_name: str) -> Optional[int]:
 
 def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display 5-hour rolling limit and weekly quota limits across Gemini, Argon, and Claude pools."""
-    tier = getattr(args, "tier", "pro") or "pro"
+    tier = getattr(args, "tier", None)
     custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
     custom_weekly = _parse_limit_arg(getattr(args, "weekly_limit", None), "--weekly-limit")
     custom_argon_weekly = _parse_limit_arg(getattr(args, "argon_weekly_limit", None), "--argon-weekly-limit")
@@ -1105,6 +1105,8 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     print(Colors.bold(Colors.cyan("── ANTIGRAVITY QUOTA & RATE LIMITS MONITOR " + "─" * 38)))
     print(f"  {Colors.bold('Model Groups:')}   Gemini Models  |  Claude and GPT models  |  Gemini 4 Argon")
     print(f"  {Colors.bold('Subscription:')}   {tier_cfg.display_name} ({tier_cfg.description})")
+    if pools.tier_source == "auto":
+        print(f"  {Colors.bold('Tier:')}           auto-detected ({tier_cfg.name.capitalize()})")
     print(f"  {Colors.bold('Quota Source:')}   {sync_tag}")
     if pools.live_error is not None:
         print(f"    {Colors.dim('↳')} {Colors.dim(pools.live_error)}")
@@ -1262,7 +1264,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
 
 def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display compact single-line quota status for shell prompt, tmux, or status bars."""
-    tier = getattr(args, "tier", "pro") or "pro"
+    tier = getattr(args, "tier", None)
     custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
     custom_weekly = _parse_limit_arg(getattr(args, "weekly_limit", None), "--weekly-limit")
     custom_argon_weekly = _parse_limit_arg(getattr(args, "argon_weekly_limit", None), "--argon-weekly-limit")
