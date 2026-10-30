@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import re
 import sqlite3
@@ -12,6 +13,8 @@ from urllib.parse import quote
 
 from agy_usage.models import SessionSummary, StepRecord, TokenUsage, normalize_model_name
 
+
+logger = logging.getLogger(__name__)
 
 _MAX_VARINT_BYTES = 10
 _U64_MASK = (1 << 64) - 1
@@ -106,7 +109,7 @@ def parse_timestamp_proto(data: bytes) -> Optional[datetime]:
                 break
         if seconds > 0:
             return datetime.fromtimestamp(seconds)
-    except Exception:
+    except (OSError, OverflowError, ValueError, TypeError):
         pass
     return None
 
@@ -434,8 +437,18 @@ class AntigravityParser:
                                 ts = parse_timestamp_proto(val)
                                 if ts:
                                     start_time_blob = ts
-                except Exception:
-                    pass
+                except (
+                    sqlite3.DatabaseError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    OverflowError,
+                    UnicodeDecodeError,
+                ) as exc:
+                    logger.debug(
+                        "Skipping trajectory_metadata_blob in %s: %s", db_path, exc
+                    )
 
             # Keep the blob start time for partial summaries: a failure in any
             # later stage must not lose the only timestamp already parsed.
@@ -528,8 +541,16 @@ class AntigravityParser:
                             if last_step_idx >= 0:
                                 step_to_model[last_step_idx] = resolved
                                 step_to_model[last_step_idx + 1] = resolved
-                except Exception:
-                    pass
+                except (
+                    sqlite3.DatabaseError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    OverflowError,
+                    UnicodeDecodeError,
+                ) as exc:
+                    logger.debug("Skipping gen_metadata in %s: %s", db_path, exc)
 
             gm_anchors: List[Tuple[int, str]] = sorted(
                 (idx_anchor, m_name)
@@ -592,8 +613,16 @@ class AntigravityParser:
 
                 if found_title:
                     title = found_title
-            except Exception:
-                pass
+            except (
+                sqlite3.DatabaseError,
+                ValueError,
+                TypeError,
+                KeyError,
+                IndexError,
+                OverflowError,
+                UnicodeDecodeError,
+            ) as exc:
+                logger.debug("Skipping title extraction in %s: %s", db_path, exc)
 
             # 4. Extract Step Records and Token Usage
             try:
@@ -617,9 +646,19 @@ class AntigravityParser:
             raw_steps: List[Tuple[int, Optional[datetime], str, TokenUsage]] = []
 
             for idx, meta_blob in step_rows:
+                # A corrupt BLOB column can hold any SQLite type (dynamic typing).
+                if meta_blob is None or meta_blob == b"":
+                    continue
+                if not isinstance(meta_blob, (bytes, bytearray, memoryview)):
+                    logger.debug(
+                        "Skipping step idx=%r in %s: non-bytes metadata (%s)",
+                        idx,
+                        db_path,
+                        type(meta_blob).__name__,
+                    )
+                    continue
+                meta_blob = bytes(meta_blob)
                 try:
-                    if not meta_blob:
-                        continue
                     meta_fields = parse_proto_fields(meta_blob)
                     meta_map: Dict[int, bytes | int] = {
                         f: v for f, w, v in meta_fields
@@ -666,8 +705,19 @@ class AntigravityParser:
                     # BUG-018: Record step candidate without immediate db_mtime fallback;
                     # missing timestamps will be filled via neighbour inference below.
                     raw_steps.append((idx, step_ts, step_model, step_usage))
-                except Exception:
+                except (
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    IndexError,
+                    OverflowError,
+                    UnicodeDecodeError,
+                    sqlite3.DatabaseError,
+                ) as exc:
                     # One malformed row must not discard the rest of the session
+                    logger.debug(
+                        "Skipping malformed step idx=%r in %s: %s", idx, db_path, exc
+                    )
                     continue
 
             # BUG-018: Fill missing timestamps using nearest neighbour inference.
@@ -690,6 +740,16 @@ class AntigravityParser:
                     # No timestamp could be inferred; drop the step
                     continue
 
+                # Build everything that can raise before mutating any state, so
+                # `steps` and `aggregated_usage` never drift apart.
+                new_usage = aggregated_usage.add(step_usage)
+                step_rec = StepRecord(
+                    step_idx=idx,
+                    timestamp=final_ts,
+                    model=step_model,
+                    usage=step_usage,
+                )
+
                 if first_ts is None or final_ts < first_ts:
                     first_ts = final_ts
                 if last_ts is None or final_ts > last_ts:
@@ -699,15 +759,8 @@ class AntigravityParser:
                 model_token_totals[step_model] = (
                     model_token_totals.get(step_model, 0) + step_usage.total_tokens
                 )
-
-                step_rec = StepRecord(
-                    step_idx=idx,
-                    timestamp=final_ts,
-                    model=step_model,
-                    usage=step_usage,
-                )
                 steps.append(step_rec)
-                aggregated_usage = aggregated_usage.add(step_usage)
+                aggregated_usage = new_usage
 
             return build_summary()
 

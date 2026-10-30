@@ -99,26 +99,6 @@ class TestPartialSessionParse(unittest.TestCase):
             self.assertEqual(summary.usage.total_tokens, 2400)
             self.assertEqual([s.step_idx for s in summary.steps], [1, 3])
 
-    def test_lock_during_step_read_returns_partial_summary(self):
-        ts = self._timestamp(1_751_234_567)
-        meta = self._len_field(1, ts) + self._len_field(9, self._usage(1000, 200))
-
-        with tempfile.TemporaryDirectory() as tmp:
-            path = self._write_db(
-                os.path.join(tmp, "sess-locked.db"),
-                [(1, meta)],
-                title="Locked session",
-            )
-            summary = self._parse_with_locked_steps(path)
-
-            self.assertIsNotNone(summary, "a transient lock dropped the whole session")
-            self.assertEqual(summary.session_id, "sess-locked")
-            self.assertEqual(summary.title, "Locked session")
-            self.assertEqual(summary.workspace, "proj")
-            self.assertEqual(summary.start_time, datetime.fromtimestamp(1_751_000_000))
-            self.assertEqual(summary.step_count, 0)
-            self.assertEqual(summary.usage.total_tokens, 0)
-
     def _parse_with_sql_failure(self, path, marker, error):
         """Parse while any statement containing `marker` raises `error`."""
         real_connect = sqlite3.connect
@@ -200,6 +180,41 @@ class TestPartialSessionParse(unittest.TestCase):
             self.assertEqual(summary.step_count, 1)
             self.assertEqual(summary.usage.total_tokens, 1200)
 
+    def test_lock_during_gen_metadata_query_preserves_start_time_and_steps(self):
+        """The gen_metadata stage has its own guard: a lock or corrupt page there
+        must keep the blob start time, title, workspace and the step usage."""
+        meta = self._len_field(1, self._timestamp(1_751_234_567))
+        meta += self._len_field(9, self._usage(1000, 200))
+
+        errors = (
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.DatabaseError("database disk image is malformed"),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as tmp:
+                path = self._write_db(
+                    os.path.join(tmp, "sess-gm-locked.db"),
+                    [(1, meta)],
+                    title="Locked gen metadata",
+                )
+                conn = sqlite3.connect(path)
+                try:
+                    conn.execute("CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER)")
+                    conn.execute("INSERT INTO gen_metadata (idx, data, size) VALUES (1, ?, 1)", (b"\x08\x01",))
+                    conn.commit()
+                finally:
+                    conn.close()
+
+                summary = self._parse_with_sql_failure(path, "FROM gen_metadata", error)
+
+                self.assertIsNotNone(summary)
+                self.assertEqual(summary.title, "Locked gen metadata")
+                self.assertEqual(summary.workspace, "proj")
+                self.assertEqual(summary.step_count, 1)
+                self.assertEqual(summary.usage.total_tokens, 1200)
+                # start_time still comes from trajectory_metadata_blob (earlier than the step)
+                self.assertEqual(summary.start_time, datetime.fromtimestamp(1_751_000_000))
+
     def test_corrupt_db_during_step_read_returns_partial_summary(self):
         """A plain sqlite3.DatabaseError (corrupt page) is not an
         OperationalError and must keep the already-parsed metadata too."""
@@ -268,6 +283,101 @@ class TestPartialSessionParse(unittest.TestCase):
             self.assertIsNotNone(summary)
             self.assertEqual(summary.step_count, 0)
             self.assertEqual(summary.usage.total_tokens, 0)
+
+    def test_out_of_range_mtime_does_not_abort_parse(self):
+        """getmtime() can return a value datetime.fromtimestamp rejects with
+        OverflowError/ValueError; that must degrade like an unreadable mtime."""
+        timed = self._len_field(1, self._timestamp(1_751_234_567))
+        timed += self._len_field(9, self._usage(1000, 200))
+        untimed = self._len_field(9, self._usage(500, 100))
+
+        for bad_mtime in (1e20, -1e20, float("inf"), float("nan")):
+            with self.subTest(mtime=bad_mtime):
+                patcher = mock.patch("agy_usage.parser.os.path.getmtime", return_value=bad_mtime)
+
+                # Timed rows are unaffected by the bad mtime.
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = self._write_db(os.path.join(tmp, "sess-bad-mtime-timed.db"), [(1, timed)])
+                    with patcher:
+                        summary = AntigravityParser.parse_session_db(path)
+                    self.assertIsNotNone(summary, "out-of-range mtime aborted the parse")
+                    self.assertEqual(summary.step_count, 1)
+                    self.assertEqual(summary.usage.total_tokens, 1200)
+
+                # Untimed rows fall back to the blob timestamp.
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = self._write_db(os.path.join(tmp, "sess-bad-mtime-blob.db"), [(1, untimed)])
+                    with patcher:
+                        summary = AntigravityParser.parse_session_db(path)
+                    self.assertIsNotNone(summary)
+                    self.assertEqual(summary.step_count, 1)
+                    self.assertEqual(summary.usage.total_tokens, 600)
+                    self.assertEqual(summary.steps[0].timestamp, datetime.fromtimestamp(1_751_000_000))
+
+                # Untimed rows with no blob timestamp and no mtime are skipped, not fatal.
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = self._write_db(
+                        os.path.join(tmp, "sess-bad-mtime-none.db"),
+                        [(1, untimed)],
+                        include_blob_ts=False,
+                    )
+                    with patcher:
+                        summary = AntigravityParser.parse_session_db(path)
+                    self.assertIsNotNone(summary)
+                    self.assertEqual(summary.workspace, "proj")
+                    self.assertEqual(summary.step_count, 0)
+                    self.assertEqual(summary.usage.total_tokens, 0)
+
+    def test_corrupt_row_keeps_prior_and_later_steps_and_logs_debug(self):
+        ts = self._timestamp(1_751_234_567)
+        meta = self._len_field(1, ts) + self._len_field(9, self._usage(1000, 200))
+        bad_blob = b"corrupt-metadata"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_db(
+                os.path.join(tmp, "sess-corrupt-log.db"),
+                [(1, meta), (2, bad_blob), (3, meta)],
+            )
+
+            def flaky(data):
+                if data == bad_blob:
+                    raise ValueError("corrupt protobuf")
+                return parse_proto_fields(data)
+
+            with mock.patch("agy_usage.parser.parse_proto_fields", side_effect=flaky):
+                with self.assertLogs("agy_usage.parser", level="DEBUG") as logs:
+                    summary = AntigravityParser.parse_session_db(path)
+
+            self.assertTrue(logs.records)
+            self.assertTrue(all(r.levelname == "DEBUG" for r in logs.records))
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary.step_count, 2)
+            self.assertEqual(summary.usage.total_tokens, 2400)
+            self.assertEqual([s.step_idx for s in summary.steps], [1, 3])
+
+    def test_non_bytes_corrupt_step_metadata_is_skipped_without_mocking(self):
+        """SQLite's dynamic typing lets a BLOB column hold TEXT or INTEGER; such
+        rows must be skipped (and logged) while the valid rows survive."""
+        ts = self._timestamp(1_751_234_567)
+        meta = self._len_field(1, ts) + self._len_field(9, self._usage(1000, 200))
+
+        for bad in ("not-a-blob", 12345):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
+                path = self._write_db(
+                    os.path.join(tmp, "sess-dynamic-type.db"),
+                    [(1, meta), (2, bad), (3, meta)],
+                    title="Dynamic typing",
+                )
+                with self.assertLogs("agy_usage.parser", level="DEBUG") as logs:
+                    summary = AntigravityParser.parse_session_db(path)
+
+                self.assertTrue(logs.records)
+                self.assertTrue(all(r.levelname == "DEBUG" for r in logs.records))
+                self.assertIsNotNone(summary)
+                self.assertEqual(summary.title, "Dynamic typing")
+                self.assertEqual(summary.step_count, 2)
+                self.assertEqual(summary.usage.total_tokens, 2400)
+                self.assertEqual([s.step_idx for s in summary.steps], [1, 3])
 
     def test_lock_before_validation_returns_none(self):
         """If SQLite fails before the DB is known to be a session, there is no
