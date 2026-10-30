@@ -14,6 +14,7 @@ from typing import Callable, List, Optional
 
 from agy_usage import __version__
 from agy_usage.aggregator import UsageAggregator
+from agy_usage.cache import SessionCache
 from agy_usage.display import (
     Colors,
     format_cost,
@@ -362,9 +363,16 @@ def get_sessions(args: argparse.Namespace) -> List[SessionSummary]:
     elif args.ide_only:
         source_mode = "ide"
 
-    sessions = AntigravityParser.scan_all(
-        custom_dir=args.custom_dir, source_mode=source_mode
-    )
+    # `live` loads the session cache once and keeps it on args across ticks
+    cache = getattr(args, "_session_cache", None)
+    if cache is None:
+        sessions = AntigravityParser.scan_all(
+            custom_dir=args.custom_dir, source_mode=source_mode
+        )
+    else:
+        sessions = AntigravityParser.scan_all(
+            custom_dir=args.custom_dir, source_mode=source_mode, cache=cache
+        )
 
     # Optional model filter
     if getattr(args, "model", None):
@@ -866,39 +874,44 @@ def cmd_live(args: argparse.Namespace) -> int:
     interval = max(1, getattr(args, "interval", 3))
     is_json = getattr(args, "json", False)
 
-    if is_json:
-        try:
-            while True:
-                sessions = get_sessions(args)
-                sys.stdout.write(UsageExporter.to_json(sessions, indent=None) + "\n")
-                sys.stdout.flush()
-                time.sleep(interval)
-        except KeyboardInterrupt:
-            pass
-        return 0
-
-    print(Colors.cyan(f"Starting Antigravity Usage live monitor (refreshing every {interval}s). Press Ctrl+C to exit."))
-    prev_override = Colors.get_override()
-    Colors.set_override(Colors.enabled())
+    # Load the session cache once per run and reuse it on every tick
+    args._session_cache = SessionCache.load()
     try:
-        try:
-            while True:
-                sessions = get_sessions(args)
-                frame_buf = io.StringIO()
-                with redirect_stdout(frame_buf):
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"{Colors.bold(Colors.cyan('ANTIGRAVITY LIVE MONITOR'))}  {Colors.dim(f'Last updated: {now_str}')}")
-                    print()
-                    cmd_overview(sessions, args)
+        if is_json:
+            try:
+                while True:
+                    sessions = get_sessions(args)
+                    sys.stdout.write(UsageExporter.to_json(sessions, indent=None) + "\n")
+                    sys.stdout.flush()
+                    time.sleep(interval)
+            except KeyboardInterrupt:
+                pass
+            return 0
 
-                sys.stdout.write("\033[2J\033[H" + frame_buf.getvalue())
-                sys.stdout.flush()
-                time.sleep(interval)
-        except KeyboardInterrupt:
-            print()
-            print(Colors.dim("Live monitor stopped."))
+        print(Colors.cyan(f"Starting Antigravity Usage live monitor (refreshing every {interval}s). Press Ctrl+C to exit."))
+        prev_override = Colors.get_override()
+        Colors.set_override(Colors.enabled())
+        try:
+            try:
+                while True:
+                    sessions = get_sessions(args)
+                    frame_buf = io.StringIO()
+                    with redirect_stdout(frame_buf):
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"{Colors.bold(Colors.cyan('ANTIGRAVITY LIVE MONITOR'))}  {Colors.dim(f'Last updated: {now_str}')}")
+                        print()
+                        cmd_overview(sessions, args)
+
+                    sys.stdout.write("\033[2J\033[H" + frame_buf.getvalue())
+                    sys.stdout.flush()
+                    time.sleep(interval)
+            except KeyboardInterrupt:
+                print()
+                print(Colors.dim("Live monitor stopped."))
+        finally:
+            Colors.set_override(prev_override)
     finally:
-        Colors.set_override(prev_override)
+        del args._session_cache
     return 0
 
 
