@@ -133,19 +133,18 @@ class TerminalHeatmap:
         return usage.total_tokens
 
     def _calculate_thresholds(self, max_val: int) -> List[int]:
-        """Calculate 4 positive thresholds for levels 1, 2, 3, 4."""
+        """Calculate 3 cut-offs separating levels 1–4 (the brightest level starts at 65% of the max)."""
         if max_val <= 0:
-            return [1, 2, 3, 4]
+            return [1, 2, 3]
 
-        # Use quartiles or log scale
         return [
             max(1, int(max_val * 0.15)),
             max(2, int(max_val * 0.35)),
             max(3, int(max_val * 0.65)),
-            max(4, int(max_val * 0.85)),
         ]
 
     def _get_level(self, val: int, thresholds: List[int]) -> int:
+        """Return 0 for no activity, else level 1–4 by which of the 3 cut-offs ``val`` falls below."""
         if val <= 0:
             return 0
         if val < thresholds[0]:
