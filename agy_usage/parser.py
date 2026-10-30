@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import glob
 import logging
 import os
@@ -588,6 +589,9 @@ class AntigravityParser:
                 if m_name
             )
 
+            # Positions of gm_anchors, for bisecting the nearest preceding anchor.
+            gm_anchor_positions: List[int] = [a_idx for a_idx, _ in gm_anchors]
+
             default_model = (
                 sorted(list(known_models))[0]
                 if known_models
@@ -725,10 +729,9 @@ class AntigravityParser:
                         if u_enum is not None and u_enum in enum_to_model:
                             step_model = enum_to_model[u_enum]
                     if not step_model and gm_anchors:
-                        for anchor_idx, anchor_model in reversed(gm_anchors):
-                            if anchor_idx <= idx:
-                                step_model = anchor_model
-                                break
+                        anchor_pos = bisect.bisect_right(gm_anchor_positions, idx) - 1
+                        if anchor_pos >= 0:
+                            step_model = gm_anchors[anchor_pos][1]
                     if not step_model:
                         step_model = default_model
 
