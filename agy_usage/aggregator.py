@@ -55,13 +55,17 @@ class UsageAggregator:
         return daily
 
     @staticmethod
-    def aggregate_weekly(sessions: List[SessionSummary]) -> List[WeeklyUsage]:
+    def aggregate_weekly(
+        sessions: List[SessionSummary],
+        daily_data: Optional[Dict[date, DailyUsage]] = None,
+    ) -> List[WeeklyUsage]:
         """Aggregate usage by ISO calendar week."""
         # Key: (iso_year, iso_week)
         weekly_map: Dict[Tuple[int, int], WeeklyUsage] = {}
         weekly_sessions: Dict[Tuple[int, int], set] = defaultdict(set)
 
-        daily_data = UsageAggregator.aggregate_daily(sessions)
+        if daily_data is None:
+            daily_data = UsageAggregator.aggregate_daily(sessions)
 
         for d, daily_item in daily_data.items():
             iso_year, iso_week, _ = d.isocalendar()
@@ -89,12 +93,16 @@ class UsageAggregator:
         return sorted(weekly_map.values(), key=lambda x: x.start_date)
 
     @staticmethod
-    def aggregate_monthly(sessions: List[SessionSummary]) -> List[MonthlyUsage]:
+    def aggregate_monthly(
+        sessions: List[SessionSummary],
+        daily_data: Optional[Dict[date, DailyUsage]] = None,
+    ) -> List[MonthlyUsage]:
         """Aggregate usage by calendar month."""
         monthly_map: Dict[Tuple[int, int], MonthlyUsage] = {}
         monthly_sessions: Dict[Tuple[int, int], set] = defaultdict(set)
 
-        daily_data = UsageAggregator.aggregate_daily(sessions)
+        if daily_data is None:
+            daily_data = UsageAggregator.aggregate_daily(sessions)
 
         for d, daily_item in daily_data.items():
             key = (d.year, d.month)

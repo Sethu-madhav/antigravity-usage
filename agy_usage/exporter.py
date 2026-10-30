@@ -6,10 +6,11 @@ import csv
 import io
 import json
 import sys
-from typing import List, Optional
+from datetime import date
+from typing import Dict, List, Optional
 
 from agy_usage.aggregator import UsageAggregator
-from agy_usage.models import SessionSummary
+from agy_usage.models import DailyUsage, SessionSummary
 
 
 class UsageExporter:
@@ -20,12 +21,13 @@ class UsageExporter:
         sessions: List[SessionSummary],
         include_steps: bool = False,
         indent: Optional[int] = 2,
+        daily_data: Optional[Dict[date, DailyUsage]] = None,
     ) -> str:
         """Serialize all usage data, rollups, and sessions to JSON."""
-        summary = UsageAggregator.compute_summary(sessions)
-        daily = UsageAggregator.aggregate_daily(sessions)
-        weekly = UsageAggregator.aggregate_weekly(sessions)
-        monthly = UsageAggregator.aggregate_monthly(sessions)
+        daily = daily_data if daily_data is not None else UsageAggregator.aggregate_daily(sessions)
+        summary = UsageAggregator.compute_summary(sessions, daily_data=daily)
+        weekly = UsageAggregator.aggregate_weekly(sessions, daily_data=daily)
+        monthly = UsageAggregator.aggregate_monthly(sessions, daily_data=daily)
         models = UsageAggregator.aggregate_models(sessions)
 
         data = {
