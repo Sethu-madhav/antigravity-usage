@@ -30,21 +30,13 @@ class HeatmapColor:
     # Fallback 256-color palette
     XTERM_LEVELS = [236, 22, 28, 35, 46]
 
-    RESET = "\033[0m"
-    DIM = "\033[2m"
-    BOLD = "\033[1m"
-    CYAN = "\033[36m"
-    GRAY = "\033[90m"
+    # Plain-text shades used when colors are disabled
+    SYMBOLS = ["·", "░", "▒", "▓", "█"]
 
     @classmethod
     def supports_color(cls) -> bool:
         """Check if ANSI colors are enabled (honors the global --no-color override, BUG-004)."""
         return is_color_enabled()
-
-    @classmethod
-    def wrap(cls, text: str, code: str) -> str:
-        """Style text with an ANSI code, or return it plain when colors are disabled."""
-        return Colors.color(text, code)
 
     @classmethod
     def supports_truecolor(cls) -> bool:
@@ -54,19 +46,22 @@ class HeatmapColor:
     @classmethod
     def cell(cls, level: int, char: str = "■") -> str:
         """Render a single colored cell."""
-        if not cls.supports_color():
-            level = max(0, min(4, level))
-            symbols = ["·", "░", "▒", "▓", "█"]
-            return symbols[level]
-
         level = max(0, min(4, level))
+        if not cls.supports_color():
+            return cls.SYMBOLS[level]
         if cls.supports_truecolor():
             r, g, b = cls.RGB_LEVELS[level]
             # Foreground TrueColor
-            return f"\033[38;2;{r};{g};{b}m{char}{cls.RESET}"
+            return f"\033[38;2;{r};{g};{b}m{char}{Colors.RESET}"
         else:
             code = cls.XTERM_LEVELS[level]
-            return f"\033[38;5;{code}m{char}{cls.RESET}"
+            return f"\033[38;5;{code}m{char}{Colors.RESET}"
+
+
+def _legend() -> str:
+    """'Less ■ ■ ■ ■ ■ More' scale shared by both heatmaps."""
+    cells = "".join(HeatmapColor.cell(lvl, "■") + " " for lvl in range(5))
+    return f"{Colors.dim('Less ')}{cells}{Colors.dim('More')}"
 
 
 class TerminalHeatmap:
@@ -185,7 +180,7 @@ class TerminalHeatmap:
         window_usage = TokenUsage()
 
         # Build 7 x num_weeks matrix
-        matrix: List[List[Tuple[date, int, int]]] = [[] for _ in range(7)]
+        matrix: List[List[Tuple[date, int]]] = [[] for _ in range(7)]
 
         for w in range(self.num_weeks):
             for d_idx in range(7):
@@ -203,7 +198,7 @@ class TerminalHeatmap:
                     has_data = usage.total_prompt_tokens > 0 if self.metric == "cache-efficiency" else val > 0
                     if has_data:
                         active_days_count += 1
-                matrix[d_idx].append((curr_date, val, 0))
+                matrix[d_idx].append((curr_date, val))
 
         thresholds = self._calculate_thresholds(max_val)
 
@@ -241,14 +236,14 @@ class TerminalHeatmap:
                 month_header_str += "  "
                 col_idx += 1
 
-        lines = [HeatmapColor.wrap(month_header_str.rstrip(), HeatmapColor.DIM)]
+        lines = [Colors.dim(month_header_str.rstrip())]
 
         # Build Weekday Rows
         for day_idx in range(7):
             label = self.WEEKDAY_LABELS[day_idx]
-            row_str = HeatmapColor.wrap(label, HeatmapColor.DIM) + " "
+            row_str = Colors.dim(label) + " "
             for w in range(self.num_weeks):
-                curr_date, val, _ = matrix[day_idx][w]
+                curr_date, val = matrix[day_idx][w]
                 if curr_date > self.end_date:
                     # Future dates within the padding week
                     cell_rendered = "  "
@@ -259,10 +254,7 @@ class TerminalHeatmap:
             lines.append(row_str)
 
         # Build Legend & Summary Line
-        legend_cells = "".join(
-            HeatmapColor.cell(lvl, "■") + " " for lvl in range(5)
-        )
-        legend_str = f"{HeatmapColor.wrap('Less ', HeatmapColor.DIM)}{legend_cells}{HeatmapColor.wrap('More', HeatmapColor.DIM)}"
+        legend_str = _legend()
 
         # Metric label
         metric_title = self.metric_label
@@ -271,9 +263,10 @@ class TerminalHeatmap:
             summary_value = f"{window_usage.cache_hit_rate:.1f}%"
         else:
             summary_value = f"{total_period_val:,}"
+        # Colors.CYAN (\033[36m), not Colors.cyan(), which uses BRIGHT_CYAN (\033[96m).
         summary_info = (
-            f"{HeatmapColor.wrap(summary_value, HeatmapColor.BOLD)} {metric_title} "
-            f"across {HeatmapColor.wrap(str(active_days_count), HeatmapColor.CYAN)} active days "
+            f"{Colors.bold(summary_value)} {metric_title} "
+            f"across {Colors.color(str(active_days_count), Colors.CYAN)} active days "
             f"in last {self.num_weeks} weeks"
         )
 
@@ -323,22 +316,21 @@ class HourOfDayHeatmap(TerminalHeatmap):
             f"{h:02d}".ljust(self.HOUR_LABEL_STEP * self.HOUR_CELL_WIDTH)
             for h in range(0, 24, self.HOUR_LABEL_STEP)
         )
-        lines = [HeatmapColor.wrap("     " + header.rstrip(), HeatmapColor.DIM)]
+        lines = [Colors.dim("     " + header.rstrip())]
         for day_idx in range(7):
-            row_str = HeatmapColor.wrap(self.WEEKDAY_LABELS[day_idx], HeatmapColor.DIM) + " "
+            row_str = Colors.dim(self.WEEKDAY_LABELS[day_idx]) + " "
             for hour in range(24):
                 level = self._get_level(grid[day_idx][hour], thresholds)
                 row_str += HeatmapColor.cell(level, "■") + " "
             lines.append(row_str)
 
-        legend_cells = "".join(HeatmapColor.cell(lvl, "■") + " " for lvl in range(5))
-        legend_str = f"{HeatmapColor.wrap('Less ', HeatmapColor.DIM)}{legend_cells}{HeatmapColor.wrap('More', HeatmapColor.DIM)}"
+        legend_str = _legend()
 
         hour_totals = [sum(grid[d][h] for d in range(7)) for h in range(24)]
-        summary_info = f"{HeatmapColor.wrap(f'{total:,}', HeatmapColor.BOLD)} Tokens in last {self.num_weeks} weeks"
+        summary_info = f"{Colors.bold(f'{total:,}')} Tokens in last {self.num_weeks} weeks"
         if total > 0:
             peak = hour_totals.index(max(hour_totals))
-            summary_info += f", busiest hour {HeatmapColor.wrap(f'{peak:02d}:00', HeatmapColor.CYAN)}"
+            summary_info += f", busiest hour {Colors.color(f'{peak:02d}:00', Colors.CYAN)}"
 
         lines.append("")
         lines.append(f" {legend_str}    {summary_info}")

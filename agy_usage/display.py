@@ -283,7 +283,7 @@ def render_table(
         alignments = ["left"] * num_cols
 
     # Calculate max column widths
-    str_rows: List[List[str]] = []
+    str_rows: List[List[Tuple[str, int]]] = []
     col_widths = [len(h) for h in headers]
 
     for row in rows:
@@ -294,7 +294,7 @@ def render_table(
             visible_len = len(strip_ansi(s))
             if visible_len > col_widths[i]:
                 col_widths[i] = visible_len
-            row_strs.append(s)
+            row_strs.append((s, visible_len))
         str_rows.append(row_strs)
 
     # Box-drawing characters
@@ -322,12 +322,12 @@ def render_table(
     for i, h in enumerate(headers):
         w = col_widths[i]
         align = alignments[i]
-        if align == "right":
-            padded = h.rjust(w)
-        elif align == "center":
+        if align == "center":
+            # str.center puts an odd leftover space on the left when the width
+            # is odd, unlike _pad; keep it so header bytes stay unchanged.
             padded = h.center(w)
         else:
-            padded = h.ljust(w)
+            padded = _pad(h, len(h), w, align)
         h_cells.append(f" {Colors.bold(padded)} ")
     lines.append(f"{Colors.dim(VERT)}{f'{Colors.dim(VERT)}'.join(h_cells)}{Colors.dim(VERT)}")
     lines.append(Colors.dim(mid_border))
@@ -335,24 +335,25 @@ def render_table(
     # Data rows
     for row in str_rows:
         r_cells = []
-        for i, cell in enumerate(row):
-            w = col_widths[i]
-            align = alignments[i]
-            visible_len = len(strip_ansi(cell))
-            padding_len = max(0, w - visible_len)
-            if align == "right":
-                padded = (" " * padding_len) + cell
-            elif align == "center":
-                left_pad = padding_len // 2
-                right_pad = padding_len - left_pad
-                padded = (" " * left_pad) + cell + (" " * right_pad)
-            else:
-                padded = cell + (" " * padding_len)
+        for i, (cell, visible_len) in enumerate(row):
+            padded = _pad(cell, visible_len, col_widths[i], alignments[i])
             r_cells.append(f" {padded} ")
         lines.append(f"{Colors.dim(VERT)}{f'{Colors.dim(VERT)}'.join(r_cells)}{Colors.dim(VERT)}")
 
     lines.append(Colors.dim(bot_border))
     return "\n".join(lines)
+
+
+def _pad(text: str, visible_len: int, width: int, align: str) -> str:
+    """Pad text whose printable length is visible_len to width columns."""
+    padding_len = max(0, width - visible_len)
+    if align == "right":
+        return (" " * padding_len) + text
+    if align == "center":
+        left_pad = padding_len // 2
+        right_pad = padding_len - left_pad
+        return (" " * left_pad) + text + (" " * right_pad)
+    return text + (" " * padding_len)
 
 
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
