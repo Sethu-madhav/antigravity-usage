@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Dict, List, Optional, Set, Tuple
@@ -192,6 +193,7 @@ def normalize_model_name(model_name: str) -> str:
     return m
 
 
+@functools.lru_cache(maxsize=None)
 def _resolve_pricing_key(model_name: str) -> str:
     m = (model_name or "").lower()
     matches = [key for key in MODEL_PRICING if key in m]
@@ -331,9 +333,12 @@ class StepRecord:
     usage: TokenUsage
     duration_ms: float = 0.0
 
-    @property
+    @functools.cached_property
     def cost(self) -> CostBreakdown:
-        """Cost of this single request, priced with its own model and date."""
+        """Cost of this single request, priced with its own model and date.
+
+        The value is computed once per instance, so the record must not be mutated after its cost is read.
+        """
         return price_usage(self.usage, self.model, self.timestamp.date(), per_request=True)
 
     def to_dict(self) -> dict:
@@ -377,9 +382,12 @@ class SessionSummary:
             return self.models[0]
         return "unknown"
 
-    @property
+    @functools.cached_property
     def cost(self) -> CostBreakdown:
-        """Estimated cost, priced per step so mixed-model sessions are correct."""
+        """Estimated cost, priced per step so mixed-model sessions are correct.
+
+        The value is computed once per instance, so the record must not be mutated after its cost is read.
+        """
         if self.steps:
             return price_steps(self.steps)
         on_date = self.start_time.date() if self.start_time else None
