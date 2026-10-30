@@ -28,7 +28,7 @@ class UsageExporter:
         summary = UsageAggregator.compute_summary(sessions, daily_data=daily)
         weekly = UsageAggregator.aggregate_weekly(sessions, daily_data=daily)
         monthly = UsageAggregator.aggregate_monthly(sessions, daily_data=daily)
-        models = UsageAggregator.aggregate_models(sessions)
+        models = summary["models"]
 
         data = {
             "summary": {
