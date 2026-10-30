@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -511,13 +512,38 @@ def _fetch_user_tier(base_url: str, headers: Dict[str, str]) -> Tuple[Optional[s
 
 
 def _write_quota_cache(result: Dict[str, Any]) -> None:
-    """Persist a live reading to ``_QUOTA_CACHE_PATH``; a cache failure never breaks a fetch."""
+    """Persist a live reading to ``_QUOTA_CACHE_PATH``; a cache failure never breaks a fetch.
+
+    The reading is written to a temp file in the same directory and moved into
+    place with ``os.replace``, so a concurrent reader (e.g. a tmux ``statusline``
+    refresh) or a crash mid-write never sees a truncated file.
+    """
+    cache_path = _QUOTA_CACHE_PATH
+    tmp_path: Optional[str] = None
     try:
-        os.makedirs(os.path.dirname(_QUOTA_CACHE_PATH), exist_ok=True)
-        with open(_QUOTA_CACHE_PATH, "w", encoding="utf-8") as fp:
+        cache_dir = os.path.dirname(cache_path)
+        os.makedirs(cache_dir, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=cache_dir,
+            delete=False,
+            prefix=".agy_usage_quota_cache.",
+            suffix=".tmp",
+        ) as fp:
+            tmp_path = fp.name
             json.dump(result, fp, indent=2)
+            fp.flush()
+        os.replace(tmp_path, cache_path)
+        tmp_path = None
     except Exception:
         pass
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def _read_quota_cache(note: Callable[[str], None]) -> Optional[Dict[str, Any]]:
