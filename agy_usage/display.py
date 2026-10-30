@@ -66,20 +66,15 @@ class Colors:
     DIM = "\033[2m"
     UNDERLINE = "\033[4m"
 
-    BLACK = "\033[30m"
     RED = "\033[31m"
     GREEN = "\033[32m"
     YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
     CYAN = "\033[36m"
-    WHITE = "\033[37m"
 
     # Bright variants
     BRIGHT_GREEN = "\033[92m"
     BRIGHT_YELLOW = "\033[93m"
     BRIGHT_CYAN = "\033[96m"
-    BRIGHT_WHITE = "\033[97m"
     GRAY = "\033[90m"
 
     @classmethod
@@ -139,10 +134,6 @@ class Colors:
     @classmethod
     def yellow(cls, text: str) -> str:
         return cls.color(text, cls.BRIGHT_YELLOW)
-
-    @classmethod
-    def magenta(cls, text: str) -> str:
-        return cls.color(text, cls.MAGENTA)
 
     @classmethod
     def gray(cls, text: str) -> str:
@@ -235,7 +226,7 @@ def format_duration_verbose(seconds: float) -> str:
 
 
 
-def render_bar(val: float, max_val: float, width: int = 20, color_func=None) -> str:
+def render_bar(val: float, max_val: float, width: int = 20) -> str:
     """Render a horizontal Unicode bar chart."""
     if max_val <= 0 or val <= 0:
         return " " * width
@@ -250,8 +241,6 @@ def render_bar(val: float, max_val: float, width: int = 20, color_func=None) -> 
     bar_str = ("█" * full_blocks) + rem_char
     bar_str = bar_str.ljust(width)
 
-    if color_func and Colors.enabled():
-        return color_func(bar_str)
     return Colors.cyan(bar_str)
 
 
@@ -420,7 +409,6 @@ def render_kpi_grid(cards: List[Tuple[str, str, str]], card_width: int = 26) -> 
     if not cards:
         return ""
 
-    import shutil
     term_cols = shutil.get_terminal_size((120, 24)).columns
     if len(cards) == 4 and term_cols < (4 * card_width + 6):
         cards_per_row = 2

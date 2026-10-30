@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import shutil
-import sys
 from datetime import date, timedelta
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from agy_usage.display import Colors, is_color_enabled, supports_truecolor
 from agy_usage.models import DailyUsage, TokenUsage

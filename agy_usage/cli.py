@@ -8,7 +8,7 @@ import sys
 import time
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional
 
 from agy_usage import __version__
 from agy_usage import display as _display
@@ -36,10 +36,9 @@ from agy_usage.limits import (
     WindowStats,
     get_status_badge,
     parse_token_amount,
-    render_gauge_bar,
     render_remaining_bar,
 )
-from agy_usage.models import SessionSummary, calculate_cost
+from agy_usage.models import SessionSummary
 from agy_usage.parser import AntigravityParser
 
 
@@ -430,15 +429,6 @@ def get_sessions(args: argparse.Namespace) -> List[SessionSummary]:
         ]
 
     return sessions
-
-
-def print_banner(sessions_count: int, sources_desc: str) -> None:
-    """Print header banner."""
-    title = f"ANTIGRAVITY MODEL USAGE TRACKER"
-    sub = f"Loaded {sessions_count} sessions from {sources_desc}"
-    print(Colors.bold(Colors.cyan(title)))
-    print(Colors.dim(sub))
-    print()
 
 
 def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
