@@ -1,6 +1,6 @@
 # Improvements — agy-usage
 
-Ergonomics, robustness, and hygiene ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `a2904b2`, dated 2026-10-28; current baseline `727f58f` (PRs #1-#34 merged, 204 tests passing).
+Ergonomics, robustness, and hygiene ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `a2904b2`, dated 2026-10-28; current baseline `3599733` (PRs #1-#37 merged, 210 tests passing).
 
 > **Status legend:** ⬜ Open · 🔧 In progress · ✅ Done · ❌ Won't do
 > **Severity:** 🔴 High · 🟠 Med · 🟡 Low
@@ -15,9 +15,9 @@ Ergonomics, robustness, and hygiene ledger. Split from `BUG_TRACKER.md` on 2026-
 | IMP-004 | 🟡 | ✅ | Truncation hygiene: displayed workspace/title/models cells now go through `display.truncate_ansi()`, so clipped text ends in `…` and keeps ANSI styling instead of hard-slicing mid-word (PR #32, `33ff01b`) | FEAT-010 |
 | IMP-005 | 🟡 | ✅ | `heatmap --details` now clips rows to the rendered week window and labels the table `ACTIVE DAYS DETAILS (Last N Weeks)`; an empty window prints a hint instead of an empty table (PR #33, `2967f42`) | BUG-014 |
 | IMP-006 | 🟠 | ✅ | Test gaps: quota/statusline tests are now hermetic via the patchable `limits.should_use_live_server()` seam; fake `/tmp/*.db` paths can no longer trigger a live probe, and explicit/auto/patched branches are covered (PR #34, `727f58f`) | BUG-003, BUG-005, OPT-001 |
-| IMP-007 | 🟡 | ⬜ | Stale epilog: `--help` examples now list `current`, `limits` and `monthly` but still omit `statusline`, `live` and `--no-color`; subcommand numbering comments restart mid-file | — |
-| IMP-008 | 🟡 | ⬜ | CSV emits formatted strings ("95.0%", "$3.91"); emit raw floats for spreadsheets. Statusline JSON lacks a plain badge field (`live --json` already streams NDJSON since BUG-019; extend NDJSON to other commands only if wanted) | BUG-024, BUG-020 |
-| IMP-009 | 🟡 | ⬜ | LICENSE file and SPDX `license = "MIT"` shipped with BUG-023 (PR #22); still open: add `.pytest_cache/`, `.coverage`, `.mypy_cache/`, `.ruff_cache/` to `.gitignore` | BUG-023 |
+| IMP-007 | 🟡 | ✅ | `--help` epilog now lists `statusline`, `live` and `--no-color`, and the subcommand numbering comments in `parse_args()` run 1-11 without repeats (PR #35) | — |
+| IMP-008 | 🟡 | ✅ | `limits --csv` emits raw numbers for percentages and cost; statusline JSON/CSV gain `badge_plain`, and the statusline CSV drops the formatted `*_str` columns. NDJSON for other commands stays out of scope (PR #37, `3599733`) | BUG-024, BUG-020 |
+| IMP-009 | 🟡 | ✅ | `.gitignore` now covers `.pytest_cache/`, `.coverage`, `.mypy_cache/` and `.ruff_cache/`; pinned by `test_gitignore_hygiene.py` (PR #36, `599cf66`) | BUG-023 |
 
 ## Notes
 
