@@ -12,9 +12,31 @@ from unittest import mock
 from agy_usage.cli import cmd_statusline, main as cli_main
 from agy_usage.models import SessionSummary, StepRecord, TokenUsage
 
-FIELDS = [
+CSV_FIELDS = [
     "status",
     "badge",
+    "badge_plain",
+    "tier",
+    "five_hour_pct",
+    "five_hour_refresh",
+    "five_hour_used_tokens",
+    "five_hour_limit_tokens",
+    "weekly_pct",
+    "weekly_refresh",
+    "weekly_used_tokens",
+    "weekly_limit_tokens",
+    "argon_weekly_pct",
+    "argon_weekly_refresh",
+    "argon_weekly_used_tokens",
+    "argon_weekly_limit_tokens",
+    "today_tokens",
+    "today_cost_usd",
+]
+
+JSON_FIELDS = [
+    "status",
+    "badge",
+    "badge_plain",
     "tier",
     "five_hour_pct",
     "five_hour_refresh",
@@ -101,15 +123,26 @@ class TestStatuslineCsv(unittest.TestCase):
         csv_row = self._parse_csv(self._capture_cmd(csv=True))
         payload = json.loads(self._capture_cmd(json=True))
 
-        self.assertEqual(list(csv_row.keys()), FIELDS)
-        self.assertEqual(list(payload.keys()), FIELDS)
-        for field in FIELDS:
+        self.assertEqual(list(csv_row.keys()), CSV_FIELDS)
+        self.assertEqual(list(payload.keys()), JSON_FIELDS)
+        for field in CSV_FIELDS:
             self.assertEqual(csv_row[field], str(payload[field]), field)
+
+        self.assertNotIn("today_tokens_str", csv_row)
+        self.assertNotIn("today_cost_str", csv_row)
+        self.assertIn(csv_row["badge_plain"], {"[OK]", "[WARN]", "[ALERT]", "[UNKNOWN]"})
+        self.assertIn(payload["badge_plain"], {"[OK]", "[WARN]", "[ALERT]", "[UNKNOWN]"})
+
+        for key, val in csv_row.items():
+            self.assertNotIn("$", val, f"Cell {key} contains $")
+            self.assertNotIn("%", val, f"Cell {key} contains %")
+        float(csv_row["today_cost_usd"])
+        int(csv_row["today_tokens"])
 
     def test_csv_has_header_and_one_data_row(self):
         out = self._capture_cmd(csv=True)
         self.assertEqual(len(out.strip().splitlines()), 2)
-        self.assertEqual(out.splitlines()[0], ",".join(FIELDS))
+        self.assertEqual(out.splitlines()[0], ",".join(CSV_FIELDS))
 
     def test_main_csv_after_and_before_subcommand(self):
         for argv in (["statusline", "--csv"], ["--csv", "statusline"]):
@@ -117,7 +150,7 @@ class TestStatuslineCsv(unittest.TestCase):
                 rc, out = self._run_main(argv)
                 self.assertEqual(rc, 0)
                 self.assertEqual(len(out.strip().splitlines()), 2)
-                self.assertEqual(self._parse_csv(out).keys(), set(FIELDS))
+                self.assertEqual(list(self._parse_csv(out).keys()), CSV_FIELDS)
                 self.assertNotIn("\033", out)
                 for fragment in ("5h:", "Wk:", "Today:"):
                     self.assertNotIn(fragment, out)
