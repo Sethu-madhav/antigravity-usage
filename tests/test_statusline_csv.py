@@ -39,6 +39,13 @@ class TestStatuslineCsv(unittest.TestCase):
     """Regression tests for BUG-024: `statusline --csv` (before or after the
     subcommand) used to be silently ignored and print the one-line status."""
 
+    def setUp(self):
+        # IMP-006: keep `compute_all_pools` (reached through cmd_statusline with
+        # the fake path /tmp/ssc.db) from querying the live language_server.
+        patcher = mock.patch("agy_usage.limits.should_use_live_server", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _session(self):
         t = datetime.now()
         usage = TokenUsage(prompt_tokens=1000, cached_tokens=4000, output_tokens=200)

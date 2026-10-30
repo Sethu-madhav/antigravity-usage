@@ -3,12 +3,22 @@
 import io
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 from agy_usage.display import Colors, format_percent, strip_ansi
 from agy_usage.models import SessionSummary, StepRecord, TokenUsage
 
 
 class TestLimits(unittest.TestCase):
+    def setUp(self):
+        # IMP-006: fake session file paths (e.g. /tmp/sr.db) must never make
+        # compute_all_pools shell out to the live language_server based on what
+        # happens to exist on this machine. Tests of the auto-detection itself
+        # live in tests/test_live_server_seam.py.
+        patcher = mock.patch("agy_usage.limits.should_use_live_server", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_parse_token_amount(self):
         from agy_usage.limits import parse_token_amount
         self.assertEqual(parse_token_amount("50M"), 50_000_000)
