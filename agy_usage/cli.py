@@ -50,6 +50,7 @@ Examples:
   agy-usage                       Show summary dashboard & mini heatmap
   agy-usage current               Show token usage & totals for the most recent session
   agy-usage limits                Show current 5-hour limit and weekly quota limits
+  agy-usage statusline            Compact quota status line for shell prompt or tmux
   agy-usage heatmap               Show full GitHub-style contribution heatmap
   agy-usage heatmap --metric cached  Heatmap colored by cached tokens
   agy-usage sessions              List recent conversation sessions and token stats
@@ -57,9 +58,11 @@ Examples:
   agy-usage weekly                Show weekly aggregated usage table & bar chart
   agy-usage monthly               Show monthly aggregated usage table & bar chart
   agy-usage models                Show token breakdown by model
+  agy-usage live                  Live-refreshing quota monitor (Ctrl+C to stop)
   agy-usage --dir ~/.gemini/antigravity/conversations  Analyze a specific directory
   agy-usage --json                Export usage data as JSON
   agy-usage --csv                 Export usage data as CSV
+  agy-usage --no-color            Disable ANSI color output
 """,
     )
 
@@ -245,17 +248,17 @@ Examples:
         "weekly", help="Weekly token usage table and volume chart", parents=[common]
     )
 
-    # 6. monthly
+    # 7. monthly
     subparsers.add_parser(
         "monthly", help="Monthly token usage table and volume chart", parents=[common]
     )
 
-    # 7. models
+    # 8. models
     subparsers.add_parser(
         "models", help="Token breakdown and distribution by model", parents=[common]
     )
 
-    # 8. live / watch mode
+    # 9. live / watch mode
     sub_live = subparsers.add_parser(
         "live", help="Live watch mode: automatically refresh metrics",
         parents=[common],
@@ -267,7 +270,7 @@ Examples:
         help="Refresh interval in seconds (default: 3)",
     )
 
-    # 9. limits
+    # 10. limits
     sub_limits = subparsers.add_parser(
         "limits", help="Show current 5-hour rolling limit and weekly quota limits",
         parents=[common],
@@ -311,7 +314,7 @@ Examples:
         help="Custom Claude weekly limit in tokens (e.g. 150M)",
     )
 
-    # 10. statusline
+    # 11. statusline
     sub_statusline = subparsers.add_parser(
         "statusline", help="Compact single-line quota status for shell prompt or tmux",
         parents=[common],
