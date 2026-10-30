@@ -112,6 +112,11 @@ class TestPartialSessionParse(unittest.TestCase):
                     raise error
                 return self._inner.execute(sql, *params)
 
+            def __iter__(self):
+                # Like a real cursor, support iteration (dunder lookups bypass
+                # __getattr__); the parser streams step rows instead of fetchall().
+                return iter(self._inner)
+
             def __getattr__(self, name):
                 return getattr(self._inner, name)
 
