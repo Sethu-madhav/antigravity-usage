@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
 from agy_usage.models import SessionSummary, StepRecord, TokenUsage, normalize_model_name
+from agy_usage.cache import SessionCache, file_fingerprint
 
 
 logger = logging.getLogger(__name__)
@@ -275,7 +276,12 @@ class AntigravityParser:
         return dirs
 
     @classmethod
-    def scan_directory(cls, dir_path: str, source: str = "custom") -> List[SessionSummary]:
+    def scan_directory(
+        cls,
+        dir_path: str,
+        source: str = "custom",
+        cache: Optional[SessionCache] = None,
+    ) -> List[SessionSummary]:
         """Scan a directory for SQLite database files and extract session usage."""
         if not os.path.isdir(dir_path):
             return []
@@ -288,7 +294,15 @@ class AntigravityParser:
 
         sessions: List[SessionSummary] = []
         for db_file in db_files:
-            summary = cls.parse_session_db(db_file, source=source)
+            summary = None
+            fp = None
+            if cache is not None:
+                fp = file_fingerprint(db_file)
+                summary = cache.get(db_file, source)
+            if summary is None:
+                summary, complete = cls._parse_session_db_checked(db_file, source=source)
+                if summary and complete and fp is not None and cache is not None:
+                    cache.put(db_file, summary, fp)
             if summary:
                 sessions.append(summary)
         return sessions
@@ -298,8 +312,10 @@ class AntigravityParser:
         cls,
         custom_dir: Optional[str] = None,
         source_mode: str = "all",
+        use_cache: bool = True,
     ) -> List[SessionSummary]:
         """Scan all relevant directories or a specified directory."""
+        cache = SessionCache.load() if use_cache else None
         all_sessions: List[SessionSummary] = []
         if custom_dir:
             source_label = "custom"
@@ -307,12 +323,15 @@ class AntigravityParser:
                 source_label = "ide"
             elif "antigravity" in custom_dir:
                 source_label = "cli"
-            all_sessions = cls.scan_directory(custom_dir, source=source_label)
+            all_sessions = cls.scan_directory(custom_dir, source=source_label, cache=cache)
         else:
             for d_path, s_label in cls.get_default_directories(mode=source_mode):
-                all_sessions.extend(cls.scan_directory(d_path, source=s_label))
+                all_sessions.extend(cls.scan_directory(d_path, source=s_label, cache=cache))
 
             all_sessions = cls._dedupe_by_session_id(all_sessions)
+
+        if cache is not None:
+            cache.save()
 
         # Sort all sessions descending by start_time (or file mtime if start_time is missing)
         all_sessions.sort(
@@ -347,8 +366,19 @@ class AntigravityParser:
         single malformed step row keeps everything read so far and returns a
         partial summary, so one bad tick cannot drop the session from `live`.
         """
+        return cls._parse_session_db_checked(db_path, source=source)[0]
+
+    @classmethod
+    def _parse_session_db_checked(
+        cls, db_path: str, source: str = "cli"
+    ) -> Tuple[Optional[SessionSummary], bool]:
+        """parse_session_db plus a flag that is True only for a complete parse.
+
+        Partial summaries (a SQLite error after validation) return False so
+        the session cache never stores them (OPT-001).
+        """
         if not os.path.isfile(db_path):
-            return None
+            return None, False
 
         filename = os.path.basename(db_path)
         session_id = filename.replace(".db", "")
@@ -408,7 +438,7 @@ class AntigravityParser:
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = {row[0] for row in cursor.fetchall()}
             if "steps" not in tables:
-                return None
+                return None, False
             validated = True
 
             # 1. Extract Workspace / Project from trajectory_metadata_blob
@@ -762,16 +792,16 @@ class AntigravityParser:
                 steps.append(step_rec)
                 aggregated_usage = new_usage
 
-            return build_summary()
+            return build_summary(), True
 
         except sqlite3.DatabaseError:
             # SQLite failure after validation (locked, corrupt page, vanished
             # file): emit what we have so the session stays visible, unless the
             # DB was never validated as a usable session at all.
-            return build_summary() if validated else None
+            return (build_summary(), False) if validated else (None, False)
         except Exception:
             # Unknown failure: preserve the previous skip-the-session behavior.
-            return None
+            return None, False
         finally:
             if conn:
                 try:
