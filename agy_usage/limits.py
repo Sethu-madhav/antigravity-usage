@@ -18,6 +18,7 @@ from agy_usage.display import (
 from agy_usage.models import (
     SessionSummary,
     TokenUsage,
+    calculate_cost,
 )
 
 
@@ -1263,3 +1264,57 @@ def get_status_badge(
             "UNKNOWN (Antigravity server not reachable, and this device has no usage in some quota windows)"
         )
     return "🟢", Colors.green("HEALTHY (All sprint and weekly quotas are well within safe thresholds)")
+
+
+# Models that share the Claude & GPT quota pool, as (label, pricing model name).
+CLAUDE_POOL_MODELS: Tuple[Tuple[str, str], ...] = (
+    ("Opus", "claude-opus-5-5"),
+    ("Sonnet", "claude-sonnet-5-5"),
+    ("GPT-OSS", "gpt-oss-120b"),
+)
+
+# Token mix used when there is no Claude usage to measure one from: a 90% prompt
+# cache hit rate (as the tier token figures assume) with 2% of tokens as output.
+REFERENCE_TOKEN_MIX = TokenUsage(prompt_tokens=98, cached_tokens=882, output_tokens=20)
+
+
+def tokens_for_budget(budget_usd: float, model: str, mix: TokenUsage) -> int:
+    """Tokens of ``model`` that ``budget_usd`` buys when spent in the proportions of ``mix``.
+
+    The Claude & GPT pool is capped in USD, not tokens, so the same cap buys about
+    twice as many Sonnet tokens as Opus tokens. ``mix`` supplies the non-cached /
+    cached / output split; its absolute size does not matter.
+    """
+    total = mix.total_tokens
+    if budget_usd <= 0 or total <= 0:
+        return 0
+    mix_cost = calculate_cost(
+        mix.prompt_tokens, mix.cached_tokens, mix.output_tokens, model
+    )[3]
+    if mix_cost <= 0:
+        return 0
+    return int(budget_usd / mix_cost * total)
+
+
+def claude_pool_tokens_by_model(
+    budget_usd: float, mix: TokenUsage
+) -> List[Tuple[str, int]]:
+    """``(label, tokens)`` that ``budget_usd`` buys for each model in the Claude & GPT pool."""
+    return [
+        (label, tokens_for_budget(budget_usd, model, mix))
+        for label, model in CLAUDE_POOL_MODELS
+    ]
+
+
+def claude_budget_left_usd(
+    tier: TierConfig, claude_5h: WindowStats, claude_7d: WindowStats
+) -> Optional[float]:
+    """USD left in the Claude & GPT pool right now: the tighter of the 5-hour and weekly windows.
+
+    None when either window is unknown (server unreachable and no local usage).
+    """
+    if claude_5h.is_unknown or claude_7d.is_unknown:
+        return None
+    left_5h = tier.claude_five_hour_cost_usd * claude_5h.pct_remaining / 100.0
+    left_7d = tier.claude_weekly_cost_usd * claude_7d.pct_remaining / 100.0
+    return min(left_5h, left_7d)

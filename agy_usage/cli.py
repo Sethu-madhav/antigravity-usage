@@ -30,12 +30,16 @@ from agy_usage.display import (
 from agy_usage.exporter import UsageExporter
 from agy_usage.heatmap import HourOfDayHeatmap, TerminalHeatmap
 from agy_usage.limits import (
+    CLAUDE_POOL_MODELS,
     CRIT,
+    REFERENCE_TOKEN_MIX,
     TIERS,
     WARN_MODERATE,
     LimitsCalculator,
     MultiPoolLimits,
     WindowStats,
+    claude_budget_left_usd,
+    claude_pool_tokens_by_model,
     get_status_badge,
     parse_token_amount,
     render_remaining_bar,
@@ -976,6 +980,23 @@ def _compute_pools_from_args(
     )
 
 
+def _claude_token_mix(claude_7d: WindowStats):
+    """(mix, note) for converting the Claude & GPT USD cap into tokens per model.
+
+    Uses this week's Claude usage when there is any, otherwise a typical mix.
+    """
+    if claude_7d.usage.total_tokens > 0:
+        return claude_7d.usage, f"at this week's {claude_7d.usage.cache_hit_rate:.1f}% cache hit rate"
+    return REFERENCE_TOKEN_MIX, f"at a typical {REFERENCE_TOKEN_MIX.cache_hit_rate:.0f}% cache hit rate"
+
+
+def _format_tokens_by_model(budget_usd: float, mix) -> str:
+    """'~5.64M Opus | ~11.28M Sonnet | ~39.80M GPT-OSS' for a Claude & GPT pool budget."""
+    return " | ".join(
+        f"~{format_tokens(n)} {label}" for label, n in claude_pool_tokens_by_model(budget_usd, mix)
+    )
+
+
 def _refresh_countdown(w: WindowStats, now: datetime) -> str:
     """'in 3h 30m', 'Ready' or 'unknown' for when a quota window refreshes."""
     if w.is_unknown:
@@ -1018,8 +1039,12 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     if getattr(args, "json", False) and getattr(args, "csv", False):
         print("Warning: both --json and --csv specified; using --json.", file=sys.stderr)
 
+    claude_mix, claude_mix_note = _claude_token_mix(claude_7d)
+    claude_left_usd = claude_budget_left_usd(tier_cfg, claude_5h, claude_7d)
+
     # JSON export support
     if getattr(args, "json", False):
+        model_ids = [model for _, model in CLAUDE_POOL_MODELS]
         payload = {
             "tier": tier_cfg.name,
             "checked_at": now_str,
@@ -1036,6 +1061,14 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
             "claude_pool": {
                 "five_hour_window": _window_to_dict(claude_5h),
                 "weekly_budget": _window_to_dict(claude_7d),
+                "weekly_cap_tokens_by_model": dict(zip(
+                    model_ids,
+                    (n for _, n in claude_pool_tokens_by_model(tier_cfg.claude_weekly_cost_usd, claude_mix)),
+                )),
+                "tokens_left_by_model": None if claude_left_usd is None else dict(zip(
+                    model_ids,
+                    (n for _, n in claude_pool_tokens_by_model(claude_left_usd, claude_mix)),
+                )),
             },
         }
         print(json.dumps(payload, indent=2))
@@ -1181,6 +1214,9 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
         print(f"    {Colors.dim('↳')} {_format_refresh_status(claude_5h, '5-hour')}")
         print(f"  {Colors.bold('Weekly Tokens Consumed:')}     {format_tokens(claude_7d.usage.total_tokens)} total ({format_tokens(claude_7d.usage.billable_tokens)} billable, {format_tokens(claude_7d.usage.cached_tokens)} cached @ {format_percent(claude_7d.usage.cache_hit_rate)} hit rate)")
         print(f"  {Colors.bold('Activity Volume:')}            {claude_7d.step_count} turns across {claude_7d.session_count} session(s) this week ({format_cost(claude_7d.estimated_cost)}) | 5h: {claude_5h.step_count} turns ({format_cost(claude_5h.estimated_cost)})")
+        print(f"  {Colors.bold('Weekly Cap by Model:')}        {_format_tokens_by_model(tier_cfg.claude_weekly_cost_usd, claude_mix)} ({format_cost(tier_cfg.claude_weekly_cost_usd)} cap, {claude_mix_note})")
+        left_text = "unknown" if claude_left_usd is None else f"{_format_tokens_by_model(claude_left_usd, claude_mix)} ({format_cost(claude_left_usd)} left)"
+        print(f"  {Colors.bold('Tokens Left by Model:')}       {left_text}")
     print()
 
     # 4. Group 3: Gemini 4 Argon (Weekly-Only Pool)
@@ -1207,7 +1243,10 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
             f"~{format_tokens(t_item.five_hour_limit)} ({format_cost(t_item.five_hour_cost_usd)})",
             f"~{format_tokens(t_item.weekly_limit)} ({format_cost(t_item.weekly_cost_usd)})",
             f"~{format_tokens(t_item.argon_weekly_limit)} ({format_cost(t_item.argon_weekly_cost_usd)})" if t_item.argon_weekly_limit > 0 else "N/A",
-            f"~{format_tokens(t_item.claude_weekly_limit)} ({format_cost(t_item.claude_weekly_cost_usd)})" if t_item.claude_weekly_limit > 0 else "N/A",
+            " / ".join(
+                f"~{format_tokens(n)} {label}"
+                for label, n in claude_pool_tokens_by_model(t_item.claude_weekly_cost_usd, claude_mix)[:2]
+            ) + f" ({format_cost(t_item.claude_weekly_cost_usd)})" if t_item.claude_weekly_limit > 0 else "N/A",
             "Flash only" if k == "free" else ("Gemini + Argon + Claude/GPT" if k == "pro" else "All Models (5x Quota)"),
             status_cell,
         ])
@@ -1216,6 +1255,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     print(Colors.dim("💡 Tip: Within each group, quota is consumed proportionally to the USD cost of the tokens."))
     print(Colors.dim("   Gemini 4 Argon uses an independent weekly-only quota pool (no 5-hour limit)."))
     print(Colors.dim("   Claude & GPT partner models share their own 5-hour and weekly quota pool."))
+    print(Colors.dim(f"   That pool is capped in USD, so Opus gets about half the tokens Sonnet does (token figures {claude_mix_note})."))
     return 0
 
 
