@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from typing import Any, List, Optional, Tuple
@@ -360,11 +361,12 @@ def render_table(
     return "\n".join(lines)
 
 
+_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+
+
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences to compute raw printable character length."""
-    import re
-    ansi_pattern = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-    return ansi_pattern.sub("", text)
+    return _ANSI_RE.sub("", text)
 
 
 def truncate_ansi(text: str, max_visible: int) -> str:
@@ -375,15 +377,13 @@ def truncate_ansi(text: str, max_visible: int) -> str:
     if vis_len <= max_visible:
         return text
 
-    import re
-    ansi_pattern = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
     target_chars = max(0, max_visible - 1)
     out: List[str] = []
     vis_count = 0
     has_ansi = False
     pos = 0
     while pos < len(text) and vis_count < target_chars:
-        m = ansi_pattern.match(text, pos)
+        m = _ANSI_RE.match(text, pos)
         if m:
             out.append(m.group(0))
             has_ansi = True
