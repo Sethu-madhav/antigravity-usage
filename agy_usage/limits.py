@@ -125,6 +125,47 @@ TIERS: Dict[str, TierConfig] = {
 }
 
 
+@dataclass(frozen=True)
+class _PoolSpec:
+    """How a two-window (5-hour + weekly) quota pool maps onto tiers and server buckets."""
+
+    pool: str
+    bucket_5h: str
+    bucket_7d: str
+    limit_5h_attr: str
+    limit_7d_attr: str
+    cost_5h_attr: str
+    cost_7d_attr: str
+    label_5h: str
+    label_7d: str
+
+
+_POOL_SPECS: Tuple[_PoolSpec, _PoolSpec] = (
+    _PoolSpec(
+        pool="gemini",
+        bucket_5h="gemini-5h",
+        bucket_7d="gemini-weekly",
+        limit_5h_attr="five_hour_limit",
+        limit_7d_attr="weekly_limit",
+        cost_5h_attr="five_hour_cost_usd",
+        cost_7d_attr="weekly_cost_usd",
+        label_5h="Gemini 5-Hour Limit",
+        label_7d="Gemini Weekly Limit",
+    ),
+    _PoolSpec(
+        pool="claude",
+        bucket_5h="3p-5h",
+        bucket_7d="3p-weekly",
+        limit_5h_attr="claude_five_hour_limit",
+        limit_7d_attr="claude_weekly_limit",
+        cost_5h_attr="claude_five_hour_cost_usd",
+        cost_7d_attr="claude_weekly_cost_usd",
+        label_5h="Claude & GPT 5-Hour Limit",
+        label_7d="Claude & GPT Weekly Limit",
+    ),
+)
+
+
 def tier_key_from_server_id(user_tier_id: Any) -> Optional[str]:
     """Map a ``GetUserStatus`` ``userTier.id`` to a ``TIERS`` key, or None if unrecognised.
 
@@ -879,6 +920,51 @@ class LimitsCalculator:
         return w
 
     @staticmethod
+    def _compute_spec_windows(
+        spec: _PoolSpec,
+        items: List[Tuple[datetime, TokenUsage, float, str]],
+        tier: TierConfig,
+        current_time: datetime,
+        use_live_server: bool,
+        live_buckets: Dict[str, Dict[str, Any]],
+        has_server_buckets: bool,
+        custom_5h: Optional[int],
+        custom_7d: Optional[int],
+    ) -> Tuple[WindowStats, WindowStats]:
+        """Compute a pool's 5-hour and weekly windows from its ``_PoolSpec`` and the tier."""
+        is_custom_5h = custom_5h is not None and custom_5h > 0
+        is_custom_7d = custom_7d is not None and custom_7d > 0
+        w_5h = LimitsCalculator._compute_pool_window(
+            items,
+            current_time=current_time,
+            duration=timedelta(hours=5),
+            limit_tokens=custom_5h if is_custom_5h else getattr(tier, spec.limit_5h_attr),
+            pool=spec.pool,
+            window_label=spec.label_5h,
+            cost_limit_usd=None
+            if is_custom_5h or not use_live_server
+            else getattr(tier, spec.cost_5h_attr),
+            bucket=live_buckets.get(spec.bucket_5h) if has_server_buckets else None,
+            has_custom_token_limit=is_custom_5h,
+            calibrate=has_server_buckets,
+        )
+        w_7d = LimitsCalculator._compute_pool_window(
+            items,
+            current_time=current_time,
+            duration=timedelta(days=7),
+            limit_tokens=custom_7d if is_custom_7d else getattr(tier, spec.limit_7d_attr),
+            pool=spec.pool,
+            window_label=spec.label_7d,
+            cost_limit_usd=None
+            if is_custom_7d or not use_live_server
+            else getattr(tier, spec.cost_7d_attr),
+            bucket=live_buckets.get(spec.bucket_7d) if has_server_buckets else None,
+            has_custom_token_limit=is_custom_7d,
+            calibrate=has_server_buckets,
+        )
+        return w_5h, w_7d
+
+    @staticmethod
     def compute_all_pools(
         sessions: List[SessionSummary],
         tier_name: Optional[str] = "pro",
@@ -947,33 +1033,20 @@ class LimitsCalculator:
         # OPT-005: classify every step once, then split into the three pools.
         pool_items = LimitsCalculator._partition_pool_items(sessions)
 
+        gemini_spec, claude_spec = _POOL_SPECS
+        windows: Dict[str, Tuple[WindowStats, ...]] = {}
+
         # 1. Gemini Flash / Pro Pool
-        gemini_items = pool_items["gemini"]
-        g5_custom = five_h_limit is not None and five_h_limit > 0
-        g7_custom = weekly_limit is not None and weekly_limit > 0
-        gemini_5h = LimitsCalculator._compute_pool_window(
-            gemini_items,
-            current_time=current_time,
-            duration=timedelta(hours=5),
-            limit_tokens=five_h_limit if g5_custom else tier.five_hour_limit,
-            pool="gemini",
-            window_label="Gemini 5-Hour Limit",
-            cost_limit_usd=None if g5_custom or not use_live_server else tier.five_hour_cost_usd,
-            bucket=live_buckets.get("gemini-5h") if has_server_buckets else None,
-            has_custom_token_limit=g5_custom,
-            calibrate=has_server_buckets,
-        )
-        gemini_7d = LimitsCalculator._compute_pool_window(
-            gemini_items,
-            current_time=current_time,
-            duration=timedelta(days=7),
-            limit_tokens=weekly_limit if g7_custom else tier.weekly_limit,
-            pool="gemini",
-            window_label="Gemini Weekly Limit",
-            cost_limit_usd=None if g7_custom or not use_live_server else tier.weekly_cost_usd,
-            bucket=live_buckets.get("gemini-weekly") if has_server_buckets else None,
-            has_custom_token_limit=g7_custom,
-            calibrate=has_server_buckets,
+        windows["gemini"] = LimitsCalculator._compute_spec_windows(
+            gemini_spec,
+            pool_items["gemini"],
+            tier,
+            current_time,
+            use_live_server,
+            live_buckets,
+            has_server_buckets,
+            five_h_limit,
+            weekly_limit,
         )
 
         # 2. Gemini 4 Argon Pool (weekly-only quota pool, no 5-hour window)
@@ -1011,33 +1084,19 @@ class LimitsCalculator:
                 argon_7d.limit_tokens = calibrated
 
         # 3. Claude and GPT Partner Pool (5-hour + weekly quota pool)
-        claude_items = pool_items["claude"]
-        c5_custom = claude_five_h_limit is not None and claude_five_h_limit > 0
-        c7_custom = claude_weekly_limit is not None and claude_weekly_limit > 0
-        claude_5h = LimitsCalculator._compute_pool_window(
-            claude_items,
-            current_time=current_time,
-            duration=timedelta(hours=5),
-            limit_tokens=claude_five_h_limit if c5_custom else tier.claude_five_hour_limit,
-            pool="claude",
-            window_label="Claude & GPT 5-Hour Limit",
-            cost_limit_usd=None if c5_custom or not use_live_server else tier.claude_five_hour_cost_usd,
-            bucket=live_buckets.get("3p-5h") if has_server_buckets else None,
-            has_custom_token_limit=c5_custom,
-            calibrate=has_server_buckets,
+        windows["claude"] = LimitsCalculator._compute_spec_windows(
+            claude_spec,
+            pool_items["claude"],
+            tier,
+            current_time,
+            use_live_server,
+            live_buckets,
+            has_server_buckets,
+            claude_five_h_limit,
+            claude_weekly_limit,
         )
-        claude_7d = LimitsCalculator._compute_pool_window(
-            claude_items,
-            current_time=current_time,
-            duration=timedelta(days=7),
-            limit_tokens=claude_weekly_limit if c7_custom else tier.claude_weekly_limit,
-            pool="claude",
-            window_label="Claude & GPT Weekly Limit",
-            cost_limit_usd=None if c7_custom or not use_live_server else tier.claude_weekly_cost_usd,
-            bucket=live_buckets.get("3p-weekly") if has_server_buckets else None,
-            has_custom_token_limit=c7_custom,
-            calibrate=has_server_buckets,
-        )
+        gemini_5h, gemini_7d = windows["gemini"]
+        claude_5h, claude_7d = windows["claude"]
 
         if live_error is not None:
             for w in (gemini_5h, gemini_7d, argon_7d, claude_5h, claude_7d):
