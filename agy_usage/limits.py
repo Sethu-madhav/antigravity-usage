@@ -9,7 +9,7 @@ import subprocess
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from agy_usage.display import (
     Colors,
@@ -535,30 +535,49 @@ class LimitsCalculator:
     """Calculates 5-hour and 7-day weekly quota cycle usage across Antigravity model pools."""
 
     @staticmethod
+    def _iter_pool_items(
+        sessions: List[SessionSummary],
+    ) -> Iterator[Tuple[str, Tuple[datetime, TokenUsage, float, str]]]:
+        """Yield ``(pool, (timestamp, usage, step_cost_usd, session_id))`` in session/step order.
+
+        Each step, or each step-less session (timestamped by its start/end), is
+        classified exactly once. Timestamps are stripped of their timezone.
+        """
+        for s in sessions:
+            if s.steps:
+                for step in s.steps:
+                    st_ts = step.timestamp
+                    if st_ts.tzinfo:
+                        st_ts = st_ts.replace(tzinfo=None)
+                    yield classify_model_pool(step.model), (
+                        st_ts,
+                        step.usage,
+                        step.cost.total,
+                        s.session_id,
+                    )
+            else:
+                s_time = s.start_time or s.end_time
+                if s_time:
+                    s_ts = s_time.replace(tzinfo=None) if s_time.tzinfo else s_time
+                    yield classify_model_pool(s.primary_model), (
+                        s_ts,
+                        s.usage,
+                        s.cost.total,
+                        s.session_id,
+                    )
+
+    @staticmethod
     def _collect_pool_items(
         sessions: List[SessionSummary],
         pool: Optional[str] = "gemini",
     ) -> List[Tuple[datetime, TokenUsage, float, str]]:
         """Collect chronological (timestamp, usage, step_cost_usd, session_id) for a pool."""
-        items: List[Tuple[datetime, TokenUsage, float, str]] = []
         filter_pool = None if pool in (None, "all") else pool
-        for s in sessions:
-            if s.steps:
-                for step in s.steps:
-                    if filter_pool and classify_model_pool(step.model) != filter_pool:
-                        continue
-                    st_ts = step.timestamp
-                    if st_ts.tzinfo:
-                        st_ts = st_ts.replace(tzinfo=None)
-                    items.append((st_ts, step.usage, step.cost.total, s.session_id))
-            else:
-                if filter_pool and classify_model_pool(s.primary_model) != filter_pool:
-                    continue
-                s_time = s.start_time or s.end_time
-                if s_time:
-                    s_ts = s_time.replace(tzinfo=None) if s_time.tzinfo else s_time
-                    items.append((s_ts, s.usage, s.cost.total, s.session_id))
-
+        items = [
+            item
+            for item_pool, item in LimitsCalculator._iter_pool_items(sessions)
+            if not filter_pool or item_pool == filter_pool
+        ]
         items.sort(key=lambda x: x[0])
         return items
 
@@ -576,22 +595,8 @@ class LimitsCalculator:
             "argon": [],
             "claude": [],
         }
-        for s in sessions:
-            if s.steps:
-                for step in s.steps:
-                    st_ts = step.timestamp
-                    if st_ts.tzinfo:
-                        st_ts = st_ts.replace(tzinfo=None)
-                    pools[classify_model_pool(step.model)].append(
-                        (st_ts, step.usage, step.cost.total, s.session_id)
-                    )
-            else:
-                s_time = s.start_time or s.end_time
-                if s_time:
-                    s_ts = s_time.replace(tzinfo=None) if s_time.tzinfo else s_time
-                    pools[classify_model_pool(s.primary_model)].append(
-                        (s_ts, s.usage, s.cost.total, s.session_id)
-                    )
+        for item_pool, item in LimitsCalculator._iter_pool_items(sessions):
+            pools[item_pool].append(item)
 
         for items in pools.values():
             items.sort(key=lambda x: x[0])
@@ -639,19 +644,12 @@ class LimitsCalculator:
         cycle_start = current_time - duration
         cycle_end = current_time
 
+        # Decide the cycle bounds first; an expired or empty cycle accumulates nothing.
+        accumulate = False
         if override_reset_time is not None and override_reset_time > current_time:
             cycle_end = override_reset_time
             cycle_start = override_reset_time - duration
-            for ts, u, step_cost, sid in items:
-                if cycle_start <= ts <= current_time:
-                    usage = usage.add(u)
-                    cost += step_cost
-                    steps_count += 1
-                    sessions_ids.add(sid)
-                    if earliest is None or ts < earliest:
-                        earliest = ts
-                    if latest is None or ts > latest:
-                        latest = ts
+            accumulate = True
         elif items:
             c_start = items[0][0]
             c_end = c_start + duration
@@ -663,16 +661,19 @@ class LimitsCalculator:
             if current_time < c_end:
                 cycle_start = c_start
                 cycle_end = c_end
-                for ts, u, step_cost, sid in items:
-                    if cycle_start <= ts <= current_time:
-                        usage = usage.add(u)
-                        cost += step_cost
-                        steps_count += 1
-                        sessions_ids.add(sid)
-                        if earliest is None or ts < earliest:
-                            earliest = ts
-                        if latest is None or ts > latest:
-                            latest = ts
+                accumulate = True
+
+        if accumulate:
+            for ts, u, step_cost, sid in items:
+                if cycle_start <= ts <= current_time:
+                    usage = usage.add(u)
+                    cost += step_cost
+                    steps_count += 1
+                    sessions_ids.add(sid)
+                    if earliest is None or ts < earliest:
+                        earliest = ts
+                    if latest is None or ts > latest:
+                        latest = ts
 
         has_activity = usage.total_tokens > 0 or (
             server_remaining_fraction is not None and server_remaining_fraction < 1.0
@@ -779,6 +780,75 @@ class LimitsCalculator:
         return w_5h, w_7d, tier
 
     @staticmethod
+    def _bucket_override(
+        bucket: Optional[Dict[str, Any]],
+        current_time: datetime,
+        has_custom_token_limit: bool,
+    ) -> Optional[Tuple[datetime, float, Optional[str]]]:
+        """Return ``(reset_dt, remaining_fraction, description)`` when a bucket drives a window.
+
+        None when there is no bucket, the limit is custom, or the bucket's
+        resetTime is unparseable or not in the future. BUG-005: a bucket whose
+        resetTime is not in the future describes an expired cycle, so its
+        remainingFraction must not be grafted onto the freshly computed window.
+        """
+        if bucket is None or has_custom_token_limit:
+            return None
+        reset_dt = _parse_utc_iso_to_local_naive(bucket.get("resetTime"))
+        rem_frac = float(bucket.get("remainingFraction", 0.0))
+        desc = bucket.get("description") or None
+        if reset_dt is not None and reset_dt > current_time:
+            return reset_dt, rem_frac, desc
+        return None
+
+    @staticmethod
+    def _calibrate_limit_tokens(w: WindowStats, has_custom_token_limit: bool) -> None:
+        """Keep limit_tokens consistent with pct_used when cost/server fraction drives quota."""
+        if not has_custom_token_limit and w.usage.total_tokens > 0:
+            calibrated = calibrate_limit_from_remaining(
+                w.usage.total_tokens, w.pct_remaining
+            )
+            if calibrated is not None and calibrated > 0:
+                w.limit_tokens = calibrated
+
+    @staticmethod
+    def _compute_pool_window(
+        items: List[Tuple[datetime, TokenUsage, float, str]],
+        current_time: datetime,
+        duration: timedelta,
+        limit_tokens: int,
+        pool: str,
+        window_label: str,
+        cost_limit_usd: Optional[float],
+        bucket: Optional[Dict[str, Any]],
+        has_custom_token_limit: bool,
+        calibrate: bool = True,
+    ) -> WindowStats:
+        """Compute one window once, driven by its server bucket when valid, then calibrate.
+
+        ``calibrate=False`` skips the limit calibration (no server data to calibrate from).
+        """
+        override = LimitsCalculator._bucket_override(
+            bucket, current_time, has_custom_token_limit
+        )
+        reset_dt, rem_frac, desc = override if override is not None else (None, None, None)
+        w = LimitsCalculator._compute_cycle_window(
+            items,
+            current_time=current_time,
+            duration=duration,
+            limit_tokens=limit_tokens,
+            pool=pool,
+            window_label=window_label,
+            cost_limit_usd=cost_limit_usd,
+            override_reset_time=reset_dt,
+            server_remaining_fraction=rem_frac,
+            server_description=desc,
+        )
+        if calibrate:
+            LimitsCalculator._calibrate_limit_tokens(w, has_custom_token_limit)
+        return w
+
+    @staticmethod
     def _apply_bucket_calibration(
         w: WindowStats,
         bucket: Optional[Dict[str, Any]],
@@ -788,34 +858,24 @@ class LimitsCalculator:
         has_custom_token_limit: bool,
     ) -> WindowStats:
         """Apply live server bucket fraction/resetTime or calibrate effective token limit."""
-        if bucket is not None and not has_custom_token_limit:
-            reset_dt = _parse_utc_iso_to_local_naive(bucket.get("resetTime"))
-            rem_frac = float(bucket.get("remainingFraction", 0.0))
-            desc = bucket.get("description") or None
-            # BUG-005: a bucket whose resetTime is not in the future describes an
-            # expired cycle — its remainingFraction must not be grafted onto the
-            # freshly computed window, so leave it at its locally computed state.
-            if reset_dt is not None and reset_dt > current_time:
-                w = LimitsCalculator._compute_cycle_window(
-                    items,
-                    current_time=current_time,
-                    duration=duration,
-                    limit_tokens=w.limit_tokens,
-                    pool=w.pool,
-                    window_label=w.window_name,
-                    cost_limit_usd=w.cost_limit_usd,
-                    override_reset_time=reset_dt,
-                    server_remaining_fraction=rem_frac,
-                    server_description=desc,
-                )
-
-        # Keep limit_tokens consistent with pct_used when cost/server fraction drives quota
-        if not has_custom_token_limit and w.usage.total_tokens > 0:
-            calibrated = calibrate_limit_from_remaining(
-                w.usage.total_tokens, w.pct_remaining
+        override = LimitsCalculator._bucket_override(
+            bucket, current_time, has_custom_token_limit
+        )
+        if override is not None:
+            reset_dt, rem_frac, desc = override
+            w = LimitsCalculator._compute_cycle_window(
+                items,
+                current_time=current_time,
+                duration=duration,
+                limit_tokens=w.limit_tokens,
+                pool=w.pool,
+                window_label=w.window_name,
+                cost_limit_usd=w.cost_limit_usd,
+                override_reset_time=reset_dt,
+                server_remaining_fraction=rem_frac,
+                server_description=desc,
             )
-            if calibrated is not None and calibrated > 0:
-                w.limit_tokens = calibrated
+        LimitsCalculator._calibrate_limit_tokens(w, has_custom_token_limit)
         return w
 
     @staticmethod
@@ -891,54 +951,54 @@ class LimitsCalculator:
         gemini_items = pool_items["gemini"]
         g5_custom = five_h_limit is not None and five_h_limit > 0
         g7_custom = weekly_limit is not None and weekly_limit > 0
-        gemini_5h, gemini_7d = LimitsCalculator._compute_windows_from_items(
+        gemini_5h = LimitsCalculator._compute_pool_window(
             gemini_items,
             current_time=current_time,
-            limit_5h=five_h_limit if g5_custom else tier.five_hour_limit,
-            limit_7d=weekly_limit if g7_custom else tier.weekly_limit,
+            duration=timedelta(hours=5),
+            limit_tokens=five_h_limit if g5_custom else tier.five_hour_limit,
             pool="gemini",
-            window_5h_label="Gemini 5-Hour Limit",
-            window_7d_label="Gemini Weekly Limit",
-            cost_limit_5h_usd=None if g5_custom or not use_live_server else tier.five_hour_cost_usd,
-            cost_limit_7d_usd=None if g7_custom or not use_live_server else tier.weekly_cost_usd,
+            window_label="Gemini 5-Hour Limit",
+            cost_limit_usd=None if g5_custom or not use_live_server else tier.five_hour_cost_usd,
+            bucket=live_buckets.get("gemini-5h") if has_server_buckets else None,
+            has_custom_token_limit=g5_custom,
+            calibrate=has_server_buckets,
         )
-        if has_server_buckets:
-            gemini_5h = LimitsCalculator._apply_bucket_calibration(
-                gemini_5h,
-                live_buckets.get("gemini-5h"),
-                current_time,
-                timedelta(hours=5),
-                gemini_items,
-                g5_custom,
-            )
-            gemini_7d = LimitsCalculator._apply_bucket_calibration(
-                gemini_7d,
-                live_buckets.get("gemini-weekly"),
-                current_time,
-                timedelta(days=7),
-                gemini_items,
-                g7_custom,
-            )
+        gemini_7d = LimitsCalculator._compute_pool_window(
+            gemini_items,
+            current_time=current_time,
+            duration=timedelta(days=7),
+            limit_tokens=weekly_limit if g7_custom else tier.weekly_limit,
+            pool="gemini",
+            window_label="Gemini Weekly Limit",
+            cost_limit_usd=None if g7_custom or not use_live_server else tier.weekly_cost_usd,
+            bucket=live_buckets.get("gemini-weekly") if has_server_buckets else None,
+            has_custom_token_limit=g7_custom,
+            calibrate=has_server_buckets,
+        )
 
         # 2. Gemini 4 Argon Pool (weekly-only quota pool, no 5-hour window)
         argon_items = pool_items["argon"]
-        ar_custom = (argon_weekly_limit is not None and argon_weekly_limit > 0) or (
-            argon_remaining_pct is not None
+        ar_limit_set = argon_weekly_limit is not None and argon_weekly_limit > 0
+        ar_custom = ar_limit_set or (argon_remaining_pct is not None)
+        ar_has_bucket = (
+            not ar_limit_set
+            and argon_remaining_pct is None
+            and has_server_buckets
+            and "gemini-argon-wtu-weekly" in live_buckets
         )
-        _, argon_7d = LimitsCalculator._compute_windows_from_items(
+        argon_7d = LimitsCalculator._compute_pool_window(
             argon_items,
             current_time=current_time,
-            limit_5h=0,
-            limit_7d=argon_weekly_limit
-            if (argon_weekly_limit is not None and argon_weekly_limit > 0)
-            else tier.argon_weekly_limit,
+            duration=timedelta(days=7),
+            limit_tokens=argon_weekly_limit if ar_limit_set else tier.argon_weekly_limit,
             pool="argon",
-            window_5h_label="Argon (No 5-Hour Limit)",
-            window_7d_label="Gemini 4 Argon Weekly Limit",
-            cost_limit_5h_usd=None,
-            cost_limit_7d_usd=None if ar_custom else tier.argon_weekly_cost_usd,
+            window_label="Gemini 4 Argon Weekly Limit",
+            cost_limit_usd=None if ar_custom else tier.argon_weekly_cost_usd,
+            bucket=live_buckets.get("gemini-argon-wtu-weekly") if ar_has_bucket else None,
+            has_custom_token_limit=ar_custom,
+            calibrate=not ar_custom,
         )
-        if argon_weekly_limit is not None and argon_weekly_limit > 0:
+        if ar_limit_set:
             argon_7d.limit_tokens = argon_weekly_limit
         elif argon_remaining_pct is not None:
             argon_7d.server_remaining_fraction = max(
@@ -949,57 +1009,35 @@ class LimitsCalculator:
             )
             if calibrated is not None and calibrated > 0:
                 argon_7d.limit_tokens = calibrated
-        elif has_server_buckets and "gemini-argon-wtu-weekly" in live_buckets:
-            argon_7d = LimitsCalculator._apply_bucket_calibration(
-                argon_7d,
-                live_buckets.get("gemini-argon-wtu-weekly"),
-                current_time,
-                timedelta(days=7),
-                argon_items,
-                False,
-            )
-        else:
-            argon_7d = LimitsCalculator._apply_bucket_calibration(
-                argon_7d,
-                None,
-                current_time,
-                timedelta(days=7),
-                argon_items,
-                ar_custom,
-            )
 
         # 3. Claude and GPT Partner Pool (5-hour + weekly quota pool)
         claude_items = pool_items["claude"]
         c5_custom = claude_five_h_limit is not None and claude_five_h_limit > 0
         c7_custom = claude_weekly_limit is not None and claude_weekly_limit > 0
-        claude_5h, claude_7d = LimitsCalculator._compute_windows_from_items(
+        claude_5h = LimitsCalculator._compute_pool_window(
             claude_items,
             current_time=current_time,
-            limit_5h=claude_five_h_limit if c5_custom else tier.claude_five_hour_limit,
-            limit_7d=claude_weekly_limit if c7_custom else tier.claude_weekly_limit,
+            duration=timedelta(hours=5),
+            limit_tokens=claude_five_h_limit if c5_custom else tier.claude_five_hour_limit,
             pool="claude",
-            window_5h_label="Claude & GPT 5-Hour Limit",
-            window_7d_label="Claude & GPT Weekly Limit",
-            cost_limit_5h_usd=None if c5_custom or not use_live_server else tier.claude_five_hour_cost_usd,
-            cost_limit_7d_usd=None if c7_custom or not use_live_server else tier.claude_weekly_cost_usd,
+            window_label="Claude & GPT 5-Hour Limit",
+            cost_limit_usd=None if c5_custom or not use_live_server else tier.claude_five_hour_cost_usd,
+            bucket=live_buckets.get("3p-5h") if has_server_buckets else None,
+            has_custom_token_limit=c5_custom,
+            calibrate=has_server_buckets,
         )
-        if has_server_buckets:
-            claude_5h = LimitsCalculator._apply_bucket_calibration(
-                claude_5h,
-                live_buckets.get("3p-5h"),
-                current_time,
-                timedelta(hours=5),
-                claude_items,
-                c5_custom,
-            )
-            claude_7d = LimitsCalculator._apply_bucket_calibration(
-                claude_7d,
-                live_buckets.get("3p-weekly"),
-                current_time,
-                timedelta(days=7),
-                claude_items,
-                c7_custom,
-            )
+        claude_7d = LimitsCalculator._compute_pool_window(
+            claude_items,
+            current_time=current_time,
+            duration=timedelta(days=7),
+            limit_tokens=claude_weekly_limit if c7_custom else tier.claude_weekly_limit,
+            pool="claude",
+            window_label="Claude & GPT Weekly Limit",
+            cost_limit_usd=None if c7_custom or not use_live_server else tier.claude_weekly_cost_usd,
+            bucket=live_buckets.get("3p-weekly") if has_server_buckets else None,
+            has_custom_token_limit=c7_custom,
+            calibrate=has_server_buckets,
+        )
 
         if live_error is not None:
             for w in (gemini_5h, gemini_7d, argon_7d, claude_5h, claude_7d):
