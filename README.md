@@ -271,6 +271,13 @@ Antigravity stores conversations in SQLite databases containing Protobuf blobs:
 
 All reads are executed using SQLite URI read-only mode (`file:<path>?mode=ro`), guaranteeing that running conversations are never locked or modified.
 
+### Session Parse Caching
+
+To avoid repeatedly decoding unchanged SQLite databases and protobuf payloads across commands, parsed session summaries are cached on disk:
+- **Cache location**: `$AGY_USAGE_CACHE_DIR/sessions.json` if set, else `$XDG_CACHE_HOME/agy-usage/sessions.json` if set, else `~/.cache/agy-usage/sessions.json`.
+- **Cache invalidation**: Fingerprints track `.db` and `-wal` file sizes and nanosecond modification times. Changes to parser code or timezone signature automatically invalidate the cache.
+- **Disabling cache**: Set `AGY_USAGE_NO_CACHE=1` (or any non-empty value other than `0`) to disable disk caching completely.
+
 ---
 
 ## 🧪 Testing
