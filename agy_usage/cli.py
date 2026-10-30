@@ -543,12 +543,17 @@ def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> int
     print()
 
     if args.details:
-        # Print active days list
+        # Print active days list, scoped to the rendered heatmap window (IMP-005)
         sorted_days = sorted(
-            [d for d in daily_data.values() if d.usage.total_tokens > 0],
+            [d for d in daily_data.values()
+             if d.usage.total_tokens > 0
+             and heatmap.window_start_date <= d.date <= heatmap.end_date],
             key=lambda x: x.date,
             reverse=True,
         )
+        if not sorted_days:
+            print(Colors.dim(f"No active days in the last {heatmap.num_weeks} weeks."))
+            return 0
         d_headers = ["Date", "Day", "Sessions", "Steps", "Models", "Prompt", "Cached", "Output", "Total", "Cache %"]
         d_rows = []
         for item in sorted_days:
@@ -565,7 +570,7 @@ def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> int
                 Colors.bold(format_tokens(u.total_tokens)),
                 format_percent(u.cache_hit_rate),
             ])
-        print(render_table(d_headers, d_rows, alignments=["left", "left", "right", "right", "left", "right", "right", "right", "right", "right"], title="ACTIVE DAYS DETAILS"))
+        print(render_table(d_headers, d_rows, alignments=["left", "left", "right", "right", "left", "right", "right", "right", "right", "right"], title=f"ACTIVE DAYS DETAILS (Last {heatmap.num_weeks} Weeks)"))
     return 0
 
 
