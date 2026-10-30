@@ -973,7 +973,7 @@ def _csv_quota_cells(w) -> list:
     """Pct remaining, pct used and tokens remaining; empty when the window is unknown."""
     if w.is_unknown:
         return ["", "", ""]
-    return [f"{w.pct_remaining:.1f}%", f"{w.pct_used:.1f}%", w.tokens_remaining]
+    return [round(w.pct_remaining, 1), round(w.pct_used, 1), w.tokens_remaining]
 
 
 def _cache_age_text(age_seconds: Optional[float]) -> str:
@@ -1071,11 +1071,11 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(["Window", "Total Tokens", "Cached Tokens", "Billable Tokens", "Limit Tokens", "Pct Remaining", "Pct Used", "Tokens Remaining", "Est Cost USD", "Turns", "Sessions"])
-        writer.writerow(["5-Hour Sprint", w_5h.usage.total_tokens, w_5h.usage.cached_tokens, w_5h.usage.billable_tokens, w_5h.limit_tokens, *_csv_quota_cells(w_5h), f"{w_5h.estimated_cost:.4f}", w_5h.step_count, w_5h.session_count])
-        writer.writerow(["Weekly Cap", w_7d.usage.total_tokens, w_7d.usage.cached_tokens, w_7d.usage.billable_tokens, w_7d.limit_tokens, *_csv_quota_cells(w_7d), f"{w_7d.estimated_cost:.4f}", w_7d.step_count, w_7d.session_count])
-        writer.writerow(["Argon Weekly Cap", argon_7d.usage.total_tokens, argon_7d.usage.cached_tokens, argon_7d.usage.billable_tokens, argon_7d.limit_tokens, *_csv_quota_cells(argon_7d), f"{argon_7d.estimated_cost:.4f}", argon_7d.step_count, argon_7d.session_count])
-        writer.writerow(["Claude & GPT 5-Hour", claude_5h.usage.total_tokens, claude_5h.usage.cached_tokens, claude_5h.usage.billable_tokens, claude_5h.limit_tokens, *_csv_quota_cells(claude_5h), f"{claude_5h.estimated_cost:.4f}", claude_5h.step_count, claude_5h.session_count])
-        writer.writerow(["Claude & GPT Weekly Cap", claude_7d.usage.total_tokens, claude_7d.usage.cached_tokens, claude_7d.usage.billable_tokens, claude_7d.limit_tokens, *_csv_quota_cells(claude_7d), f"{claude_7d.estimated_cost:.4f}", claude_7d.step_count, claude_7d.session_count])
+        writer.writerow(["5-Hour Sprint", w_5h.usage.total_tokens, w_5h.usage.cached_tokens, w_5h.usage.billable_tokens, w_5h.limit_tokens, *_csv_quota_cells(w_5h), round(w_5h.estimated_cost, 4), w_5h.step_count, w_5h.session_count])
+        writer.writerow(["Weekly Cap", w_7d.usage.total_tokens, w_7d.usage.cached_tokens, w_7d.usage.billable_tokens, w_7d.limit_tokens, *_csv_quota_cells(w_7d), round(w_7d.estimated_cost, 4), w_7d.step_count, w_7d.session_count])
+        writer.writerow(["Argon Weekly Cap", argon_7d.usage.total_tokens, argon_7d.usage.cached_tokens, argon_7d.usage.billable_tokens, argon_7d.limit_tokens, *_csv_quota_cells(argon_7d), round(argon_7d.estimated_cost, 4), argon_7d.step_count, argon_7d.session_count])
+        writer.writerow(["Claude & GPT 5-Hour", claude_5h.usage.total_tokens, claude_5h.usage.cached_tokens, claude_5h.usage.billable_tokens, claude_5h.limit_tokens, *_csv_quota_cells(claude_5h), round(claude_5h.estimated_cost, 4), claude_5h.step_count, claude_5h.session_count])
+        writer.writerow(["Claude & GPT Weekly Cap", claude_7d.usage.total_tokens, claude_7d.usage.cached_tokens, claude_7d.usage.billable_tokens, claude_7d.limit_tokens, *_csv_quota_cells(claude_7d), round(claude_7d.estimated_cost, 4), claude_7d.step_count, claude_7d.session_count])
         print(buf.getvalue().strip())
         return 0
 
@@ -1356,6 +1356,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         payload = {
             "status": level,
             "badge": badge,
+            "badge_plain": badge_plain,
             "tier": tier_cfg.name,
             "five_hour_pct": pct_5h,
             "five_hour_refresh": rec_5h,
@@ -1386,6 +1387,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         headers = [
             "status",
             "badge",
+            "badge_plain",
             "tier",
             "five_hour_pct",
             "five_hour_refresh",
@@ -1400,14 +1402,13 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             "argon_weekly_used_tokens",
             "argon_weekly_limit_tokens",
             "today_tokens",
-            "today_tokens_str",
             "today_cost_usd",
-            "today_cost_str",
         ]
         writer.writerow(headers)
         writer.writerow([
             level,
             badge,
+            badge_plain,
             tier_cfg.name,
             pct_5h,
             rec_5h,
@@ -1422,9 +1423,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             argon_7d.usage.total_tokens,
             argon_7d.limit_tokens,
             tok_today,
-            tok_today_str,
             round(cost_today, 4),
-            cost_today_str,
         ])
         print(buf.getvalue().strip())
         return 0
