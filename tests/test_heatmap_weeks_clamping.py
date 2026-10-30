@@ -115,33 +115,39 @@ class TestHeatmapWeeksClamping(unittest.TestCase):
         )
         fake_session.usage.prompt_tokens = 500
 
-        # When terminal width is 80 and weeks is 52 (needs 112 columns), warn
+        # When terminal width is 80 and weeks is 52 (needs 112 columns), warn on stderr
         args = parse_args(["heatmap", "-w", "52"])
         with patch("agy_usage.heatmap.shutil.get_terminal_size", return_value=os.terminal_size((80, 24))), \
-             patch("sys.stdout", new_callable=io.StringIO) as fake_out:
+             patch("sys.stdout", new_callable=io.StringIO) as fake_out, \
+             patch("sys.stderr", new_callable=io.StringIO) as fake_err:
             cmd_heatmap([fake_session], args)
-            output = fake_out.getvalue()
+            output = fake_err.getvalue()
             self.assertIn("Warning: Terminal width (80) is narrower than heatmap (112 columns); output may wrap.", output)
+            self.assertNotIn("Warning: Terminal width", fake_out.getvalue())
 
         # When terminal width is 120 and weeks is 26 (needs 60 columns), do not warn
         args_wide = parse_args(["heatmap", "-w", "26"])
         with patch("agy_usage.heatmap.shutil.get_terminal_size", return_value=os.terminal_size((120, 24))), \
-             patch("sys.stdout", new_callable=io.StringIO) as fake_out:
+             patch("sys.stdout", new_callable=io.StringIO) as fake_out, \
+             patch("sys.stderr", new_callable=io.StringIO) as fake_err:
             cmd_heatmap([fake_session], args_wide)
-            output = fake_out.getvalue()
+            output = fake_err.getvalue()
             self.assertNotIn("Warning: Terminal width", output)
+            self.assertNotIn("Warning: Terminal width", fake_out.getvalue())
 
-        # With --no-color, warning contains no ANSI escape codes
+        # With --no-color, warning on stderr contains no ANSI escape codes
         args_no_color = parse_args(["heatmap", "-w", "52", "--no-color"])
         with patch("agy_usage.heatmap.shutil.get_terminal_size", return_value=os.terminal_size((80, 24))), \
-             patch("sys.stdout", new_callable=io.StringIO) as fake_out:
+             patch("sys.stdout", new_callable=io.StringIO) as fake_out, \
+             patch("sys.stderr", new_callable=io.StringIO) as fake_err:
             Colors.set_override(False)
             self.addCleanup(Colors.set_override, None)
             cmd_heatmap([fake_session], args_no_color)
-            output = fake_out.getvalue()
+            output = fake_err.getvalue()
             warn_line = [ln for ln in output.splitlines() if "Warning: Terminal width" in ln][0]
             self.assertNotIn("\033", warn_line)
             self.assertIn("Warning: Terminal width (80) is narrower than heatmap (112 columns); output may wrap.", warn_line)
+            self.assertNotIn("Warning: Terminal width", fake_out.getvalue())
 
 
 if __name__ == "__main__":

@@ -432,11 +432,11 @@ def print_banner(sessions_count: int, sources_desc: str) -> None:
     print()
 
 
-def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
+def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display default dashboard overview."""
     if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."))
-        return
+        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+        return 1
 
     summary = UsageAggregator.compute_summary(sessions)
     u = summary["total_usage"]
@@ -517,13 +517,14 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> No
             Colors.dim(started_str),
         ])
     print(render_table(recent_headers, recent_rows, alignments=["left", "center", "left", "left", "left", "right", "right", "right", "right"], title="RECENT SESSIONS"))
+    return 0
 
 
-def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
+def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Render full GitHub-style activity heatmap."""
     if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."))
-        return
+        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+        return 1
 
     daily_data = UsageAggregator.aggregate_daily(sessions)
     heatmap = TerminalHeatmap(
@@ -532,12 +533,12 @@ def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> Non
         weeks=args.weeks,
     )
 
-    print()
     if heatmap.is_terminal_narrow:
         print(Colors.yellow(
             f"Warning: Terminal width ({heatmap.term_cols}) is narrower than heatmap ({heatmap.required_cols} columns); output may wrap."
-        ))
-    print(Colors.bold(Colors.cyan(f"── GITHUB-STYLE CONTRIBUTION HEATMAP ({args.metric.upper()} TOKENS) " + "─" * 25)))
+        ), file=sys.stderr)
+    print()
+    print(Colors.bold(Colors.cyan(f"── GITHUB-STYLE CONTRIBUTION HEATMAP ({args.metric.upper()} TOKENS) " + "──" * 25)))
     print(heatmap.render())
     print()
 
@@ -565,13 +566,14 @@ def cmd_heatmap(sessions: List[SessionSummary], args: argparse.Namespace) -> Non
                 format_percent(u.cache_hit_rate),
             ])
         print(render_table(d_headers, d_rows, alignments=["left", "left", "right", "right", "left", "right", "right", "right", "right", "right"], title="ACTIVE DAYS DETAILS"))
+    return 0
 
 
-def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
+def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """List session summaries with token breakdowns."""
     if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."))
-        return
+        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+        return 1
 
     # Sort
     sort_key = args.sort
@@ -620,6 +622,7 @@ def cmd_sessions(sessions: List[SessionSummary], args: argparse.Namespace) -> No
     print(render_table(headers, rows, alignments=["left", "center", "left", "left", "left", "right", "right", "right", "right", "right", "right", "right", "right", "right"], title=f"CONVERSATION SESSIONS ({len(selected)} of {len(sessions)})"))
     print()
     print(Colors.dim(f"Hint: Inspect a specific session in detail with: agy-usage session <session_id>"))
+    return 0
 
 
 def cmd_session_inspect(
@@ -627,11 +630,11 @@ def cmd_session_inspect(
     session_id_arg: str = "current",
     turns_limit: Optional[int] = None,
     show_details: bool = False,
-) -> None:
+) -> int:
     """Inspect a session's token totals and optionally turn-by-turn details."""
     if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."))
-        return
+        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+        return 1
 
     target_id = (session_id_arg or "current").strip().lower()
     matched = None
@@ -645,9 +648,9 @@ def cmd_session_inspect(
                 break
 
     if not matched:
-        print(Colors.red(f"Session '{session_id_arg}' not found."))
-        print(Colors.dim("Run 'agy-usage sessions' to see all available session IDs."))
-        return
+        print(Colors.red(f"Session '{session_id_arg}' not found."), file=sys.stderr)
+        print(Colors.dim("Run 'agy-usage sessions' to see all available session IDs."), file=sys.stderr)
+        return 1
 
     is_current = (matched == sessions[0])
     label_suffix = " (Most Recent)" if is_current else ""
@@ -780,18 +783,19 @@ def cmd_session_inspect(
         cmd_name = "current" if is_current else f"session {matched.short_id}"
         print()
         print(Colors.dim(f"Hint: For turn-by-turn logs, use: agy-usage {cmd_name} --details (or -n <count>)"))
+    return 0
 
 
-def cmd_weekly(sessions: List[SessionSummary]) -> None:
+def cmd_weekly(sessions: List[SessionSummary]) -> int:
     """Display weekly aggregated token table and volume bars."""
     if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."))
-        return
+        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+        return 1
 
     weeks = UsageAggregator.aggregate_weekly(sessions)
     if not weeks:
-        print(Colors.yellow("No weekly usage data found."))
-        return
+        print(Colors.yellow("No weekly usage data found."), file=sys.stderr)
+        return 1
 
     max_tokens = max(w.usage.total_tokens for w in weeks)
 
@@ -816,18 +820,19 @@ def cmd_weekly(sessions: List[SessionSummary]) -> None:
 
     print()
     print(render_table(headers, rows, alignments=["left", "left", "right", "right", "right", "right", "right", "right", "right", "left"], title="WEEKLY TOKEN USAGE"))
+    return 0
 
 
-def cmd_monthly(sessions: List[SessionSummary]) -> None:
+def cmd_monthly(sessions: List[SessionSummary]) -> int:
     """Display monthly aggregated token table and volume bars."""
     if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."))
-        return
+        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+        return 1
 
     months = UsageAggregator.aggregate_monthly(sessions)
     if not months:
-        print(Colors.yellow("No monthly usage data found."))
-        return
+        print(Colors.yellow("No monthly usage data found."), file=sys.stderr)
+        return 1
 
     max_tokens = max(m.usage.total_tokens for m in months)
 
@@ -850,18 +855,19 @@ def cmd_monthly(sessions: List[SessionSummary]) -> None:
 
     print()
     print(render_table(headers, rows, alignments=["left", "right", "right", "right", "right", "right", "right", "right", "left"], title="MONTHLY TOKEN USAGE"))
+    return 0
 
 
-def cmd_models(sessions: List[SessionSummary]) -> None:
+def cmd_models(sessions: List[SessionSummary]) -> int:
     """Display breakdown by model."""
     if not sessions:
-        print(Colors.yellow("No Antigravity conversation sessions found."))
-        return
+        print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
+        return 1
 
     models = UsageAggregator.aggregate_models(sessions)
     if not models:
-        print(Colors.yellow("No model usage data found."))
-        return
+        print(Colors.yellow("No model usage data found."), file=sys.stderr)
+        return 1
 
     max_tokens = max(m.usage.total_tokens for m in models)
 
@@ -888,6 +894,7 @@ def cmd_models(sessions: List[SessionSummary]) -> None:
 
     print()
     print(render_table(headers, rows, alignments=["left", "right", "right", "right", "right", "right", "right", "right", "right", "right", "right", "left"], title="MODEL TOKEN USAGE BREAKDOWN"))
+    return 0
 
 
 def cmd_live(args: argparse.Namespace) -> int:
@@ -983,7 +990,7 @@ def _parse_limit_arg(raw: Optional[str], flag_name: str) -> Optional[int]:
     return parsed_val
 
 
-def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
+def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display 5-hour rolling limit and weekly quota limits across Gemini, Argon, and Claude pools."""
     tier = getattr(args, "tier", "pro") or "pro"
     custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
@@ -1046,7 +1053,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
             },
         }
         print(json.dumps(payload, indent=2))
-        return
+        return 0
 
     # CSV export support
     if getattr(args, "csv", False):
@@ -1061,7 +1068,7 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
         writer.writerow(["Claude & GPT 5-Hour", claude_5h.usage.total_tokens, claude_5h.usage.cached_tokens, claude_5h.usage.billable_tokens, claude_5h.limit_tokens, *_csv_quota_cells(claude_5h), f"{claude_5h.estimated_cost:.4f}", claude_5h.step_count, claude_5h.session_count])
         writer.writerow(["Claude & GPT Weekly Cap", claude_7d.usage.total_tokens, claude_7d.usage.cached_tokens, claude_7d.usage.billable_tokens, claude_7d.limit_tokens, *_csv_quota_cells(claude_7d), f"{claude_7d.estimated_cost:.4f}", claude_7d.step_count, claude_7d.session_count])
         print(buf.getvalue().strip())
-        return
+        return 0
 
     if pools.live_synced:
         sync_tag = Colors.green("Live Antigravity Server + Local DB")
@@ -1229,9 +1236,10 @@ def cmd_limits(sessions: List[SessionSummary], args: argparse.Namespace) -> None
     print(Colors.dim("💡 Tip: Within each group, quota is consumed proportionally to the USD cost of the tokens."))
     print(Colors.dim("   Gemini 4 Argon uses an independent weekly-only quota pool (no 5-hour limit)."))
     print(Colors.dim("   Claude & GPT partner models share their own 5-hour and weekly quota pool."))
+    return 0
 
 
-def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> None:
+def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> int:
     """Display compact single-line quota status for shell prompt, tmux, or status bars."""
     tier = getattr(args, "tier", "pro") or "pro"
     custom_5h = _parse_limit_arg(getattr(args, "five_h_limit", None), "--5h-limit")
@@ -1358,7 +1366,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             "today_cost_str": cost_today_str,
         }
         print(json.dumps(payload, indent=2))
-        return
+        return 0
 
     # CSV export
     if getattr(args, "csv", False):
@@ -1410,7 +1418,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             cost_today_str,
         ])
         print(buf.getvalue().strip())
-        return
+        return 0
 
     # Custom template format
     custom_format = getattr(args, "format", None)
@@ -1445,7 +1453,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         for k, v in replacements.items():
             res = res.replace(k, str(v))
         print(res)
-        return
+        return 0
 
     has_argon = argon_7d.usage.total_tokens > 0
 
@@ -1471,7 +1479,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             f"{argon_seg}"
             f"#[fg=colour238]| #[fg=white]Today: {tok_today_str} #[fg=green]({cost_today_str})"
         )
-        return
+        return 0
 
     # Plain mode (no colors or emojis)
     is_plain = getattr(args, "plain", False) or not Colors.enabled() or getattr(args, "no_color", False)
@@ -1482,7 +1490,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
         else:
             argon_part = f" | Ar: {rem_argon} ({rec_argon})" if has_argon else ""
             print(f"{badge_plain} 5h: {rem_5h} ({rec_5h}) | Wk: {rem_7d} ({rec_7d}){argon_part} | Today: {tok_today_str} ({cost_today_str})")
-        return
+        return 0
 
     # Default ANSI Colored mode
     if getattr(args, "short", False):
@@ -1496,6 +1504,7 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
             f"{argon_part}"
             f"Today: {tok_today_str} {Colors.green(f'({cost_today_str})')}"
         )
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1520,11 +1529,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Subcommands that handle their own formatting and exports
     if sub == "limits":
-        cmd_limits(sessions, args)
-        return 0
+        return cmd_limits(sessions, args)
     elif sub == "statusline":
-        cmd_statusline(sessions, args)
-        return 0
+        return cmd_statusline(sessions, args)
 
     # Handle global export options for other commands
     if getattr(args, "json", False) and getattr(args, "csv", False):
@@ -1538,29 +1545,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if sub is None or sub == "overview":
-        cmd_overview(sessions, args)
+        return cmd_overview(sessions, args)
     elif sub == "heatmap":
-        cmd_heatmap(sessions, args)
+        return cmd_heatmap(sessions, args)
     elif sub == "sessions":
-        cmd_sessions(sessions, args)
+        return cmd_sessions(sessions, args)
     elif sub == "current":
         turns = getattr(args, "turns", None)
         details = getattr(args, "details", False)
-        cmd_session_inspect(sessions, "current", turns_limit=turns, show_details=details)
+        return cmd_session_inspect(sessions, "current", turns_limit=turns, show_details=details)
     elif sub == "session":
         turns = getattr(args, "turns", None)
         details = getattr(args, "details", False)
-        cmd_session_inspect(sessions, args.session_id, turns_limit=turns, show_details=details)
+        return cmd_session_inspect(sessions, args.session_id, turns_limit=turns, show_details=details)
     elif sub == "weekly":
-        cmd_weekly(sessions)
+        return cmd_weekly(sessions)
     elif sub == "monthly":
-        cmd_monthly(sessions)
+        return cmd_monthly(sessions)
     elif sub == "models":
-        cmd_models(sessions)
+        return cmd_models(sessions)
     else:
-        cmd_overview(sessions, args)
-
-    return 0
+        return cmd_overview(sessions, args)
 
 
 if __name__ == "__main__":
