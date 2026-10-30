@@ -1,6 +1,6 @@
 # Optimizations — agy-usage
 
-Performance ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `a2904b2`, dated 2026-10-28; current baseline `38f9ca6` (PRs #1-#41 merged, 232 tests passing).
+Performance ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `a2904b2`, dated 2026-10-28; current baseline `adbb58d` (PRs #1-#46 merged, 293 tests passing).
 
 > **Status legend:** ⬜ Open · 🔧 In progress · ✅ Done · ❌ Won't do
 > **Severity:** 🔴 High · 🟠 Med · 🟡 Low
@@ -13,11 +13,11 @@ Performance ledger. Split from `BUG_TRACKER.md` on 2026-10-29; audit of commit `
 | OPT-001 | 🔴 | ✅ | `parser.py` (all entry points) | No incremental parse cache: every command re-parses every database on every run (PR #41, `38f9ca6`) | BUG-005, BUG-024, IMP-006 |
 | OPT-002 | 🟠 | ✅ | `cli.py:832-844` | `live` re-scans everything per tick, clears the screen before the slow work, and runs daily aggregation twice per tick (PR #40, `b0b18a1`) | OPT-001 |
 | OPT-003 | 🟠 | ✅ | `models.py:330-333, 377-382` | `step.cost` and `s.cost` recompute pricing on every access; `get_rates` does an unmemoized substring scan (PR #39, `6f10e99`) | OPT-001 |
-| OPT-004 | 🟡 | ⬜ | `aggregator.py:64,97,177` | `aggregate_daily` recomputed about 3x per run, about 7x per JSON export | — |
-| OPT-005 | 🟡 | ⬜ | `limits.py:654-735` | `_collect_pool_items` called 3x, each call re-walking every step through `classify_model_pool` | — |
-| OPT-006 | 🟡 | ⬜ | `parser.py:503-507` | Linear reverse scan over model anchors per step, O(n·m) overall | — |
-| OPT-007 | 🟡 | ⬜ | `display.py:293,306` | ANSI regex recompiled per table cell | — |
-| OPT-008 | 🟡 | ⬜ | `parser.py:453-456` | `cursor.fetchall()` materializes every metadata blob before processing begins | — |
+| OPT-004 | 🟡 | ✅ | `aggregator.py:64,97,177` | `aggregate_daily` recomputed about 3x per run, about 7x per JSON export (PR #43, `38e0d61`) | — |
+| OPT-005 | 🟡 | ✅ | `limits.py:654-735` | `_collect_pool_items` called 3x, each call re-walking every step through `classify_model_pool` (PR #44, `fab68d6`) | — |
+| OPT-006 | 🟡 | ✅ | `parser.py:503-507` | Linear reverse scan over model anchors per step, O(n·m) overall (PR #45, `2aa99b6`) | — |
+| OPT-007 | 🟡 | ✅ | `display.py:293,306` | ANSI regex recompiled per table cell (PR #42, `5f6d160`) | — |
+| OPT-008 | 🟡 | ✅ | `parser.py:453-456` | `cursor.fetchall()` materializes every metadata blob before processing begins (PR #46, `adbb58d`) | — |
 
 ## Notes
 
