@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 import time
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from typing import Any, Callable, List, Optional
 
 from agy_usage import __version__
+from agy_usage import display as _display
 from agy_usage.aggregator import UsageAggregator
 from agy_usage.display import (
     Colors,
@@ -442,7 +445,8 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> in
         print(Colors.yellow("No Antigravity conversation sessions found."), file=sys.stderr)
         return 1
 
-    summary = UsageAggregator.compute_summary(sessions)
+    daily_data = UsageAggregator.aggregate_daily(sessions)
+    summary = UsageAggregator.compute_summary(sessions, daily_data=daily_data)
     u = summary["total_usage"]
     tot_cost_bd = summary["total_cost"]
     bill_c = tot_cost_bd.billable
@@ -476,7 +480,6 @@ def cmd_overview(sessions: List[SessionSummary], args: argparse.Namespace) -> in
 
     # 2. GitHub Heatmap (last 16 weeks)
     print(Colors.bold(Colors.cyan("── ACTIVITY HEATMAP (Last 16 Weeks) " + "─" * 40)))
-    daily_data = UsageAggregator.aggregate_daily(sessions)
     heatmap = TerminalHeatmap(daily_data, metric="total", weeks=16)
     print(heatmap.render())
     print()
@@ -918,30 +921,39 @@ def cmd_live(args: argparse.Namespace) -> int:
     interval = max(1, getattr(args, "interval", 3))
     is_json = getattr(args, "json", False)
 
-    if not is_json:
-        print(Colors.cyan(f"Starting Antigravity Usage live monitor (refreshing every {interval}s). Press Ctrl+C to exit."))
-    try:
-        while True:
-            sessions = get_sessions(args)
-            if is_json:
+    if is_json:
+        try:
+            while True:
+                sessions = get_sessions(args)
                 sys.stdout.write(UsageExporter.to_json(sessions, indent=None) + "\n")
                 sys.stdout.flush()
-            else:
-                # Clear screen
-                sys.stdout.write("\033[2J\033[H")
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            pass
+        return 0
+
+    print(Colors.cyan(f"Starting Antigravity Usage live monitor (refreshing every {interval}s). Press Ctrl+C to exit."))
+    prev_override = _display._COLOR_OVERRIDE
+    Colors.set_override(Colors.enabled())
+    try:
+        try:
+            while True:
+                sessions = get_sessions(args)
+                frame_buf = io.StringIO()
+                with redirect_stdout(frame_buf):
+                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"{Colors.bold(Colors.cyan('ANTIGRAVITY LIVE MONITOR'))}  {Colors.dim(f'Last updated: {now_str}')}")
+                    print()
+                    cmd_overview(sessions, args)
+
+                sys.stdout.write("\033[2J\033[H" + frame_buf.getvalue())
                 sys.stdout.flush()
-
-                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"{Colors.bold(Colors.cyan('ANTIGRAVITY LIVE MONITOR'))}  {Colors.dim(f'Last updated: {now_str}')}")
-                print()
-
-                cmd_overview(sessions, args)
-
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        if not is_json:
+                time.sleep(interval)
+        except KeyboardInterrupt:
             print()
             print(Colors.dim("Live monitor stopped."))
+    finally:
+        Colors.set_override(prev_override)
     return 0
 
 
