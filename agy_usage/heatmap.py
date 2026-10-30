@@ -146,11 +146,27 @@ class TerminalHeatmap:
             return 3
         return 4
 
-    def render(self) -> str:
-        """Render the complete GitHub heatmap as a multi-line string."""
+    def _week_bounds(self) -> Tuple[date, date]:
+        """Compute the rendered window bounds so render() and the
+        window_start_date/window_end_date properties cannot drift."""
         # Align end_date to end of the week (Sunday: weekday 6)
         end_sunday = self.end_date + timedelta(days=(6 - self.end_date.weekday()))
         start_monday = end_sunday - timedelta(days=(self.num_weeks * 7) - 1)
+        return start_monday, end_sunday
+
+    @property
+    def window_start_date(self) -> date:
+        """Monday that begins the oldest displayed week."""
+        return self._week_bounds()[0]
+
+    @property
+    def window_end_date(self) -> date:
+        """Sunday that ends the final displayed week."""
+        return self._week_bounds()[1]
+
+    def render(self) -> str:
+        """Render the complete GitHub heatmap as a multi-line string."""
+        start_monday, end_sunday = self._week_bounds()
 
         # Collect day values and find max
         max_val = 0
