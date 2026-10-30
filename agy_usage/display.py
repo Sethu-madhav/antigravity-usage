@@ -14,6 +14,49 @@ from typing import Any, List, Optional, Tuple
 _COLOR_OVERRIDE: Optional[bool] = None
 
 
+def is_color_enabled() -> bool:
+    """Auto-detect color support: TTY-gated, NO_COLOR-aware, and TERM=dumb-aware (IMP-003).
+
+    Enablement is decided here: colors turn on when stdout is a real terminal,
+    NO_COLOR is not set, and TERM is not 'dumb'. A forced override from
+    Colors.set_override() wins over all detection.
+    """
+    if _COLOR_OVERRIDE is not None:
+        return _COLOR_OVERRIDE
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM", "").strip().lower() == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def supports_truecolor() -> bool:
+    """Check if terminal supports 24-bit TrueColor (IMP-003)."""
+    colorterm = os.environ.get("COLORTERM", "").strip().lower()
+    term = os.environ.get("TERM", "").strip().lower()
+
+    if term == "dumb":
+        return False
+
+    if "truecolor" in colorterm or "24bit" in colorterm:
+        return True
+
+    if "direct" in term or "truecolor" in term or "24bit" in term:
+        return True
+
+    under_multiplexer = bool(os.environ.get("TMUX")) or term.startswith("screen") or term.startswith("tmux")
+    if under_multiplexer:
+        return False
+
+    if "xterm-256color" in term:
+        return True
+
+    if sys.platform == "darwin":
+        return True
+
+    return False
+
+
 class Colors:
     """ANSI color codes for terminal styling."""
 
@@ -55,11 +98,12 @@ class Colors:
         COLORTERM's legitimate role is depth selection only, consulted by
         HeatmapColor.supports_truecolor() to pick truecolor vs 256-color.
         """
-        if _COLOR_OVERRIDE is not None:
-            return _COLOR_OVERRIDE
-        if os.environ.get("NO_COLOR"):
-            return False
-        return sys.stdout.isatty()
+        return is_color_enabled()
+
+    @classmethod
+    def supports_truecolor(cls) -> bool:
+        """Check if terminal supports 24-bit TrueColor."""
+        return supports_truecolor()
 
     @classmethod
     def color(cls, text: str, code: str) -> str:
