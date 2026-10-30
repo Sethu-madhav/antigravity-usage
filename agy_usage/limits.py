@@ -13,17 +13,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agy_usage.display import (
     Colors,
-    format_cost,
-    format_duration,
-    format_percent,
-    format_tokens,
-    render_kpi_grid,
-    render_table,
 )
 from agy_usage.models import (
-    CostBreakdown,
     SessionSummary,
-    StepRecord,
     TokenUsage,
 )
 

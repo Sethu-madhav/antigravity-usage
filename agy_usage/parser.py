@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
@@ -78,14 +78,6 @@ def parse_proto_fields(data: bytes) -> List[Tuple[int, int, bytes | int]]:
         # fields that parsed cleanly and stop at the corruption.
         pass
     return fields
-
-
-def parse_proto_map(data: bytes) -> Dict[int, List[bytes | int]]:
-    """Helper that parses proto fields into a dict mapping field_number -> list of values."""
-    fmap: Dict[int, List[bytes | int]] = {}
-    for fnum, _, val in parse_proto_fields(data):
-        fmap.setdefault(fnum, []).append(val)
-    return fmap
 
 
 def extract_string_candidates(data: bytes, min_len: int = 3) -> List[str]:

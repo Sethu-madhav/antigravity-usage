@@ -160,9 +160,6 @@ _FAMILY_FALLBACKS: Tuple[Tuple[str, str], ...] = (
 )
 _DEFAULT_PRICING_KEY = "gemini-3.8-flash"
 
-# Backwards-compatible view of the rates in effect today: (prompt, cached, output).
-MODEL_RATES: Dict[str, tuple[float, float, float]] = {}
-
 
 def normalize_model_name(model_name: str) -> str:
     """Normalize internal Antigravity model variants into canonical model names.
@@ -227,9 +224,6 @@ def get_model_rates(
 ) -> tuple[float, float, float]:
     """Get (prompt_per_m, cache_per_m, output_per_m) rates for a given model."""
     return get_rates(model_name, on_date).as_tuple()
-
-
-MODEL_RATES.update({key: get_model_rates(key) for key in MODEL_PRICING})
 
 
 def calculate_cost(
