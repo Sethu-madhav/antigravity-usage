@@ -152,7 +152,10 @@ class UsageAggregator:
         return sorted(result, key=lambda x: x.usage.total_tokens, reverse=True)
 
     @staticmethod
-    def compute_summary(sessions: List[SessionSummary]) -> Dict[str, Any]:
+    def compute_summary(
+        sessions: List[SessionSummary],
+        daily_data: Optional[Dict[date, DailyUsage]] = None,
+    ) -> Dict[str, Any]:
         """Compute high-level summary KPIs across all sessions."""
         total_usage = TokenUsage()
         total_cost = CostBreakdown()
@@ -174,7 +177,8 @@ class UsageAggregator:
                 if latest_ts is None or s.end_time > latest_ts:
                     latest_ts = s.end_time
 
-        daily_data = UsageAggregator.aggregate_daily(sessions)
+        if daily_data is None:
+            daily_data = UsageAggregator.aggregate_daily(sessions)
         active_days = len(daily_data)
 
         models = UsageAggregator.aggregate_models(sessions)
