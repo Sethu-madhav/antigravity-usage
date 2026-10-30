@@ -1477,6 +1477,18 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
 
     has_argon = argon_7d.usage.total_tokens > 0
 
+    # FEAT-004: 7-day token trend for --short (oldest to newest, zero-token days
+    # included). Omitted when the window has no usage: render_sparkline draws a
+    # flat series as mid-height bars, which would read as activity.
+    spark = ""
+    if getattr(args, "short", False):
+        week = [
+            daily[d].usage.total_tokens if d in daily else 0
+            for d in (now.date() - timedelta(days=i) for i in range(6, -1, -1))
+        ]
+        if any(week):
+            spark = render_sparkline(week)
+
     # Tmux mode
     if getattr(args, "tmux", False):
         ignored = [
@@ -1506,7 +1518,8 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     if is_plain:
         if getattr(args, "short", False):
             argon_short = f" Ar:{rem_argon}" if has_argon else ""
-            print(f"{badge_plain} 5h:{rem_5h} Wk:{rem_7d}{argon_short} {cost_today_str}")
+            spark_part = f" {spark}" if spark else ""
+            print(f"{badge_plain} 5h:{rem_5h} Wk:{rem_7d}{argon_short} {cost_today_str}{spark_part}")
         else:
             argon_part = f" | Ar: {rem_argon} ({rec_argon})" if has_argon else ""
             print(f"{badge_plain} 5h: {rem_5h} ({rec_5h}) | Wk: {rem_7d} ({rec_7d}){argon_part} | Today: {tok_today_str} ({cost_today_str})")
@@ -1515,7 +1528,8 @@ def cmd_statusline(sessions: List[SessionSummary], args: argparse.Namespace) -> 
     # Default ANSI Colored mode
     if getattr(args, "short", False):
         argon_short = f" {color_argon(f'Ar:{rem_argon}')}" if has_argon else ""
-        print(f"{badge} {color_5h(f'5h:{rem_5h}')} {color_7d(f'Wk:{rem_7d}')}{argon_short} {Colors.green(cost_today_str)}")
+        spark_part = f" {Colors.cyan(spark)}" if spark else ""
+        print(f"{badge} {color_5h(f'5h:{rem_5h}')} {color_7d(f'Wk:{rem_7d}')}{argon_short} {Colors.green(cost_today_str)}{spark_part}")
     else:
         argon_part = f"{color_argon('Ar:')} {color_argon(f'{rem_argon}')} {Colors.dim(f'({rec_argon})')} | " if has_argon else ""
         print(
