@@ -160,6 +160,30 @@ KNOWN_MODEL_ENUMS: Dict[int, str] = {
     1418: "gemini-4-argon-trial",
     419: "gemini-4-argon-trial",
     1419: "gemini-4-argon-trial",
+    427: "gemini-4-carbon",
+    1427: "gemini-4-carbon",
+    437: "gemini-4-carbon",
+    1437: "gemini-4-carbon",
+    525: "gemini-4-hydrogen",
+    1525: "gemini-4-hydrogen",
+    526: "gemini-4-hydrogen",
+    1526: "gemini-4-hydrogen",
+    530: "gemini-4-hydrogen-tiered-high",
+    1530: "gemini-4-hydrogen-tiered-high",
+    532: "gemini-4-neon",
+    1532: "gemini-4-neon",
+    533: "gemini-4-neon",
+    1533: "gemini-4-neon",
+    534: "gemini-4-neon",
+    1534: "gemini-4-neon",
+    535: "gemini-4-neon",
+    1535: "gemini-4-neon",
+    537: "gemini-pro-orchestrator-neon",
+    1537: "gemini-pro-orchestrator-neon",
+    667: "gemini-pro-orchestrator",
+    1667: "gemini-pro-orchestrator",
+    669: "gemini-flash-worker-agy",
+    1669: "gemini-flash-worker-agy",
 }
 
 
@@ -405,7 +429,9 @@ def _read_gen_metadata(cursor: sqlite3.Cursor, tables: Set[str], state: _ParseSt
         return
     gm_rows: List[Tuple[int, str, Optional[int]]] = []
     try:
-        cursor.execute("SELECT idx, data FROM gen_metadata WHERE size > 0 ORDER BY idx ASC")
+        cursor.execute(
+            "SELECT idx, data FROM gen_metadata WHERE data IS NOT NULL AND length(data) > 0 ORDER BY idx ASC"
+        )
         for row_idx, data in cursor.fetchall():
             if not data:
                 continue
