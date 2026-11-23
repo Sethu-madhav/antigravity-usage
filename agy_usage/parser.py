@@ -818,6 +818,7 @@ class AntigravityParser:
         )
 
         conn: Optional[sqlite3.Connection] = None
+        cursor: Optional[sqlite3.Cursor] = None
         try:
             # Connect read-only so we never lock, write, or (re)create a live DB.
             # Percent-encode the path so '?', '#', '%' etc. stay literal in the
@@ -869,6 +870,11 @@ class AntigravityParser:
             # Unknown failure: preserve the previous skip-the-session behavior.
             return None, False
         finally:
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
             if conn:
                 try:
                     conn.close()

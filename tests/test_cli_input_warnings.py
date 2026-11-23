@@ -105,7 +105,8 @@ class TestInvalidLimitArgumentWarnings(unittest.TestCase):
         ]
         for flag, invalid_val, _ in test_cases:
             with self.subTest(flag=flag, val=invalid_val):
-                rc, out, err = self._run_cli(["limits", flag, invalid_val, "--json"])
+                flag_args = [f"{flag}={invalid_val}"] if invalid_val.startswith("-") else [flag, invalid_val]
+                rc, out, err = self._run_cli(["limits", *flag_args, "--json"])
                 self.assertEqual(rc, 0)
                 expected_warning = (
                     f"Warning: ignoring invalid {flag} value {invalid_val!r}; falling back to tier default."
@@ -125,7 +126,8 @@ class TestInvalidLimitArgumentWarnings(unittest.TestCase):
         ]
         for flag, invalid_val in test_cases:
             with self.subTest(flag=flag, val=invalid_val):
-                rc, out, err = self._run_cli(["statusline", flag, invalid_val, "--json"])
+                flag_args = [f"{flag}={invalid_val}"] if invalid_val.startswith("-") else [flag, invalid_val]
+                rc, out, err = self._run_cli(["statusline", *flag_args, "--json"])
                 self.assertEqual(rc, 0)
                 expected_warning = (
                     f"Warning: ignoring invalid {flag} value {invalid_val!r}; falling back to tier default."
@@ -140,7 +142,7 @@ class TestInvalidLimitArgumentWarnings(unittest.TestCase):
             "limits",
             "--5h-limit", "5OM",
             "--weekly-limit", "bogus",
-            "--argon-weekly-limit", "-5M",
+            "--argon-weekly-limit=-5M",
             "--claude-5h-limit", "nan",
             "--json",
         ])

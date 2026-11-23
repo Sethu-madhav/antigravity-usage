@@ -210,7 +210,10 @@ class TestFetchFailureReasons(unittest.TestCase):
 
     def _fetch(self, check_output, urlopen=None):
         errors = []
-        with mock.patch.object(limits, "_QUOTA_CACHE_PATH", self.cache_path), \
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits, "_DAEMON_DIRS", ()), \
+                mock.patch.dict(os.environ, {"ANTIGRAVITY_LS_ADDRESS": "", "ANTIGRAVITY_CSRF_TOKEN": ""}), \
+                mock.patch.object(limits, "_QUOTA_CACHE_PATH", self.cache_path), \
                 mock.patch.object(limits.subprocess, "check_output", side_effect=check_output), \
                 mock.patch.object(limits.urllib.request, "urlopen", side_effect=urlopen or OSError("unused")):
             result = limits.fetch_live_quota_summary(errors=errors)

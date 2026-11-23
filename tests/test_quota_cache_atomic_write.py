@@ -111,10 +111,13 @@ class TestAtomicQuotaCacheWrite(unittest.TestCase):
             return Resp({"userStatus": {"userTier": {"id": "g1-pro-tier", "name": "Pro"}}})
 
         errors = []
-        with mock.patch.object(
-            limits.subprocess, "check_output",
-            side_effect=lambda cmd, **kw: (ps if cmd[0] == "ps" else lsof).encode(),
-        ), mock.patch.object(limits.urllib.request, "urlopen", side_effect=urlopen), \
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits, "_DAEMON_DIRS", ()), \
+                mock.patch.dict(os.environ, {"ANTIGRAVITY_LS_ADDRESS": "", "ANTIGRAVITY_CSRF_TOKEN": ""}), \
+                mock.patch.object(
+                    limits.subprocess, "check_output",
+                    side_effect=lambda cmd, **kw: (ps if cmd[0] == "ps" else lsof).encode(),
+                ), mock.patch.object(limits.urllib.request, "urlopen", side_effect=urlopen), \
                 mock.patch("agy_usage.limits.os.replace", side_effect=OSError("read-only fs")):
             result = limits.fetch_live_quota_summary(errors=errors)
 

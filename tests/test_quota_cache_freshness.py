@@ -60,6 +60,8 @@ class TestQuotaCacheFreshness(unittest.TestCase):
         )
 
         with mock.patch.object(limits, "_QUOTA_CACHE_PATH", cache_path), \
+                mock.patch.object(limits, "_DAEMON_DIRS", ()), \
+                mock.patch.dict(os.environ, {"ANTIGRAVITY_LS_ADDRESS": "", "ANTIGRAVITY_CSRF_TOKEN": ""}), \
                 mock.patch.object(limits.subprocess, "check_output", side_effect=OSError("ps disabled")):
             result = limits.fetch_live_quota_summary()
 
@@ -99,6 +101,8 @@ class TestQuotaCacheFreshness(unittest.TestCase):
         )
 
         with mock.patch.object(limits, "_QUOTA_CACHE_PATH", cache_path), \
+                mock.patch.object(limits, "_DAEMON_DIRS", ()), \
+                mock.patch.dict(os.environ, {"ANTIGRAVITY_LS_ADDRESS": "", "ANTIGRAVITY_CSRF_TOKEN": ""}), \
                 mock.patch.object(limits.subprocess, "check_output", side_effect=OSError("ps disabled")):
             self.assertIsNone(limits.fetch_live_quota_summary())
             pools = limits.LimitsCalculator.compute_all_pools(

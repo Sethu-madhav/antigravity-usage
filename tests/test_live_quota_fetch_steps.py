@@ -41,7 +41,8 @@ class _Resp:
 class TestFindLanguageServers(unittest.TestCase):
     def _find(self, output):
         notes = []
-        with mock.patch.object(limits.subprocess, "check_output", return_value=output.encode()):
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits.subprocess, "check_output", return_value=output.encode()):
             ps_ok, servers = limits._find_language_servers(notes.append)
         return ps_ok, servers, notes
 
@@ -69,7 +70,8 @@ class TestFindLanguageServers(unittest.TestCase):
 
     def test_ps_failure_reports_class_name_and_not_ok(self):
         notes = []
-        with mock.patch.object(limits.subprocess, "check_output", side_effect=OSError("x")):
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits.subprocess, "check_output", side_effect=OSError("x")):
             ps_ok, servers = limits._find_language_servers(notes.append)
         self.assertFalse(ps_ok)
         self.assertEqual(servers, [])
@@ -80,19 +82,22 @@ class TestListeningPorts(unittest.TestCase):
     def test_collects_loopback_ports_only(self):
         out = _lsof(5, 6001, 6002) + "x 5 u TCP *:7000 (LISTEN)\nx 5 u TCP 127.0.0.1:7001 (ESTABLISHED)\n"
         notes = []
-        with mock.patch.object(limits.subprocess, "check_output", return_value=out.encode()):
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits.subprocess, "check_output", return_value=out.encode()):
             self.assertEqual(limits._listening_ports("5", notes.append), [6001, 6002])
         self.assertEqual(notes, [])
 
     def test_no_ports_notes_not_listening(self):
         notes = []
-        with mock.patch.object(limits.subprocess, "check_output", return_value=_lsof(5).encode()):
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits.subprocess, "check_output", return_value=_lsof(5).encode()):
             self.assertEqual(limits._listening_ports("5", notes.append), [])
         self.assertEqual(notes, ["language_server pid 5 is not listening on 127.0.0.1"])
 
     def test_lsof_failure_returns_none(self):
         notes = []
-        with mock.patch.object(limits.subprocess, "check_output", side_effect=TimeoutError()):
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits.subprocess, "check_output", side_effect=TimeoutError()):
             self.assertIsNone(limits._listening_ports("5", notes.append))
         self.assertEqual(notes, ["could not list ports of language_server pid 5 (TimeoutError)"])
 
@@ -149,7 +154,10 @@ class TestFetchOrchestration(unittest.TestCase):
             return (ps if cmd[0] == "ps" else lsof[cmd[cmd.index("-p") + 1]]).encode()
 
         errors = []
-        with mock.patch.object(limits.subprocess, "check_output", side_effect=check_output), \
+        with mock.patch.object(limits.sys, "platform", "darwin"), \
+                mock.patch.object(limits, "_DAEMON_DIRS", ()), \
+                mock.patch.dict(os.environ, {"ANTIGRAVITY_LS_ADDRESS": "", "ANTIGRAVITY_CSRF_TOKEN": ""}), \
+                mock.patch.object(limits.subprocess, "check_output", side_effect=check_output), \
                 mock.patch.object(limits.urllib.request, "urlopen", side_effect=rpc):
             return limits.fetch_live_quota_summary(errors=errors, **kwargs), errors
 
