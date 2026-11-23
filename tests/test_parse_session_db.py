@@ -50,8 +50,9 @@ class TestParseSessionDB(unittest.TestCase):
         return path
 
     def test_hash_and_question_mark_paths_parse(self):
+        filenames = ("sess#ion.db",) if os.name == "nt" else ("sess#ion.db", "sess?ion.db")
         with tempfile.TemporaryDirectory() as tmp:
-            for filename in ("sess#ion.db", "sess?ion.db"):
+            for filename in filenames:
                 path = self._write_session_db(os.path.join(tmp, filename))
                 summary = AntigravityParser.parse_session_db(path)
                 self.assertIsNotNone(summary, f"parse failed for path: {path}")

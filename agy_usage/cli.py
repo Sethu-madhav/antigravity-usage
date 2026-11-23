@@ -1535,8 +1535,20 @@ _SESSION_COMMANDS = {
 }
 
 
+def _ensure_utf8_stdio() -> None:
+    """Reconfigure standard output streams to UTF-8 on non-UTF-8 consoles (e.g. Windows)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Entry point for CLI execution."""
+    _ensure_utf8_stdio()
     args = parse_args(argv)
 
     # Reset the shared switch to auto-detection so repeated in-process calls

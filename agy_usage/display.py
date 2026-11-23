@@ -52,6 +52,9 @@ def supports_truecolor() -> bool:
     if "xterm-256color" in term:
         return True
 
+    if os.environ.get("WT_SESSION"):
+        return True
+
     if sys.platform == "darwin":
         return True
 

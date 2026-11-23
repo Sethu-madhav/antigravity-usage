@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ctypes
+import glob
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import urllib.request
 from dataclasses import dataclass
@@ -401,6 +404,10 @@ def _parse_fetched_at(iso_str: Optional[str]) -> Optional[datetime]:
 _QUOTA_CACHE_PATH = os.path.expanduser(
     "~/.gemini/antigravity/agy_usage_quota_cache.json"
 )
+_DAEMON_DIRS: Tuple[str, ...] = (
+    os.path.expanduser("~/.gemini/antigravity/daemon"),
+    os.path.expanduser("~/.gemini/antigravity-ide/daemon"),
+)
 
 # BUG-005: the on-disk quota cache is a fallback, not a live feed — treat it as
 # valid for at most this long after it was fetched, and never rotate hours-old
@@ -416,13 +423,174 @@ _QUOTA_CACHE_MAX_AGE_SECONDS = 6 * 3600.0
 
 _CSRF_RE = re.compile(r"--csrf_token\s+([^\s]+)")
 _LISTEN_PORT_RE = re.compile(r"127\.0\.0\.1:(\d+)\s+\(LISTEN\)")
+_WIN_NETSTAT_LISTEN_RE = re.compile(
+    r"^\s*TCP\s+127\.0\.0\.1:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_pid_running(pid: int) -> bool:
+    """Return True if a process with ``pid`` is currently running."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            # PROCESS_QUERY_LIMITED_INFORMATION = 0x1000, STILL_ACTIVE = 259
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == 259
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _env_quota_endpoint() -> Optional[Tuple[str, str, str]]:
+    """Return ``(base_url, csrf_token, label)`` from Antigravity env vars, if set."""
+    addr = (os.environ.get("ANTIGRAVITY_LS_ADDRESS") or "").strip()
+    csrf = (os.environ.get("ANTIGRAVITY_CSRF_TOKEN") or "").strip()
+    if not addr or not csrf:
+        return None
+    if not addr.startswith(("http://", "https://")):
+        addr = f"http://{addr}"
+    addr = addr.rstrip("/")
+    return (
+        f"{addr}/exa.language_server_pb.LanguageServerService",
+        csrf,
+        addr,
+    )
+
+
+def _find_daemon_hub_endpoints() -> List[Tuple[int, str]]:
+    """Discover Antigravity 2.0 language servers via ``daemon/hub_*.json`` files.
+
+    Antigravity 2.0 standalone mode omits ``--csrf_token`` from process command
+    lines and writes ``pid``, ``httpPort``, and ``csrfToken`` into
+    ``~/.gemini/antigravity/daemon/hub_<port>.json``.
+    """
+    candidates: List[Tuple[float, str]] = []
+    for daemon_dir in _DAEMON_DIRS:
+        if not daemon_dir or not os.path.isdir(daemon_dir):
+            continue
+        for path in glob.glob(os.path.join(daemon_dir, "hub_*.json")):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            candidates.append((mtime, path))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    endpoints: List[Tuple[int, str]] = []
+    seen = set()
+    for _, path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        port = data.get("httpPort")
+        csrf = data.get("csrfToken")
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or port <= 0
+            or not isinstance(csrf, str)
+            or not csrf
+        ):
+            continue
+        pid = data.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+            if not _is_pid_running(pid):
+                continue
+        key = (port, csrf)
+        if key not in seen:
+            seen.add(key)
+            endpoints.append(key)
+    return endpoints
+
+
+def _find_language_servers_windows(
+    note: Callable[[str], None],
+) -> Tuple[bool, List[Tuple[str, str]]]:
+    """Windows fallback: list ``language_server`` processes carrying ``--csrf_token``."""
+    ps_cmd = (
+        "Get-CimInstance Win32_Process -Filter \"Name LIKE '%language_server%'\" "
+        "| ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }"
+    )
+    try:
+        ps_out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            stderr=subprocess.DEVNULL,
+            timeout=3.0,
+        ).decode("utf-8", errors="ignore")
+    except Exception as exc:
+        note(f"could not list processes ({exc.__class__.__name__})")
+        return False, []
+
+    servers: List[Tuple[str, str]] = []
+    for line in ps_out.splitlines():
+        if "--csrf_token" not in line:
+            continue
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid, cmd = parts[0], parts[1]
+        m_csrf = _CSRF_RE.search(cmd)
+        if m_csrf:
+            servers.append((pid, m_csrf.group(1)))
+    return True, servers
+
+
+def _listening_ports_windows(
+    pid: str, note: Callable[[str], None]
+) -> Optional[List[int]]:
+    """Windows fallback: return 127.0.0.1 TCP LISTENING ports owned by ``pid``."""
+    try:
+        netstat_out = subprocess.check_output(
+            ["netstat", "-ano", "-p", "tcp"],
+            stderr=subprocess.DEVNULL,
+            timeout=2.0,
+        ).decode("utf-8", errors="ignore")
+    except Exception as exc:
+        note(f"could not list ports of language_server pid {pid} ({exc.__class__.__name__})")
+        return None
+
+    ports: List[int] = []
+    pid_str = str(pid)
+    for line in netstat_out.splitlines():
+        m = _WIN_NETSTAT_LISTEN_RE.match(line)
+        if m and m.group(2) == pid_str:
+            ports.append(int(m.group(1)))
+    if not ports:
+        note(f"language_server pid {pid} is not listening on 127.0.0.1")
+    return ports
 
 
 def _find_language_servers(note: Callable[[str], None]) -> Tuple[bool, List[Tuple[str, str]]]:
     """List running Antigravity language_servers as ``(pid, csrf_token)``.
 
-    Returns ``(ps_ok, servers)``; ``ps_ok`` is False when ``ps`` itself failed.
+    Returns ``(ps_ok, servers)``; ``ps_ok`` is False when process listing failed.
     """
+    if sys.platform == "win32":
+        return _find_language_servers_windows(note)
+
     ps_ok = True
     try:
         ps_out = subprocess.check_output(
@@ -451,7 +619,10 @@ def _find_language_servers(note: Callable[[str], None]) -> Tuple[bool, List[Tupl
 
 
 def _listening_ports(pid: str, note: Callable[[str], None]) -> Optional[List[int]]:
-    """Return the 127.0.0.1 TCP ports ``pid`` listens on, or None when ``lsof`` fails."""
+    """Return the 127.0.0.1 TCP ports ``pid`` listens on, or None on failure."""
+    if sys.platform == "win32":
+        return _listening_ports_windows(pid, note)
+
     try:
         lsof_out = subprocess.check_output(
             ["lsof", "-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN"],
@@ -573,17 +744,54 @@ def _read_quota_cache(note: Callable[[str], None]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _query_quota_endpoint(
+    base_url: str,
+    csrf: str,
+    label: str,
+    note: Callable[[str], None],
+) -> Optional[Dict[str, Any]]:
+    """Query one Connect endpoint for quota buckets and account tier."""
+    headers = {
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+        "x-codeium-csrf-token": csrf,
+    }
+    try:
+        quota_data = _post_connect(base_url, "RetrieveUserQuotaSummary", headers, 1.2)
+        if "response" not in quota_data or "groups" not in quota_data["response"]:
+            note(f"{label}: response has no quota groups")
+            return None
+
+        buckets = _extract_buckets(quota_data)
+        user_tier_id, user_tier_name = _fetch_user_tier(base_url, headers)
+        result = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "user_tier_id": user_tier_id,
+            "user_tier_name": user_tier_name,
+            "buckets": buckets,
+        }
+        _write_quota_cache(result)
+        return result
+    except Exception as exc:
+        note(f"{label}: {str(exc)[:80] or exc.__class__.__name__}")
+        return None
+
+
 def fetch_live_quota_summary(
     use_cache: bool = True, errors: Optional[List[str]] = None
 ) -> Optional[Dict[str, Any]]:
     """Query the local Antigravity language_server for authoritative quota buckets.
 
-    Calls ``RetrieveUserQuotaSummary`` and ``GetUserStatus`` on the localhost port
-    of the running Antigravity ``language_server`` process (if active), falling back
-    to the last cached response on disk. A cache up to ~60s old is returned as is.
-    An older one, up to ``_QUOTA_CACHE_MAX_AGE_SECONDS``, is returned with
-    ``"source": "cached"`` and its ``"age_seconds"`` (the same age the error note
-    reports) so callers never render it as live server data
+    Discovers the local endpoint via:
+    1. ``ANTIGRAVITY_LS_ADDRESS`` + ``ANTIGRAVITY_CSRF_TOKEN`` env vars (when set).
+    2. Antigravity 2.0 daemon ``hub_*.json`` files under ``~/.gemini/antigravity/daemon``.
+    3. Running ``language_server`` processes carrying ``--csrf_token`` (``ps``/``lsof``
+       on POSIX; PowerShell CIM + ``netstat`` on Windows).
+
+    Falls back to the last cached response on disk. A cache up to ~60s old is
+    returned as is. An older one, up to ``_QUOTA_CACHE_MAX_AGE_SECONDS``, is
+    returned with ``"source": "cached"`` and its ``"age_seconds"`` (the same
+    age the error note reports) so callers never render it as live server data
     (BUG-005). Older caches, or caches with no buckets, are rejected.
 
     When ``errors`` is a list, a short reason is appended for each step that
@@ -594,6 +802,23 @@ def fetch_live_quota_summary(
         if errors is not None:
             errors.append(reason)
 
+    tried_direct = False
+
+    env_ep = _env_quota_endpoint()
+    if env_ep is not None:
+        tried_direct = True
+        base_url, csrf, label = env_ep
+        result = _query_quota_endpoint(base_url, csrf, label, _note)
+        if result is not None:
+            return result
+
+    for port, csrf in _find_daemon_hub_endpoints():
+        tried_direct = True
+        base_url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService"
+        result = _query_quota_endpoint(base_url, csrf, f"port {port}", _note)
+        if result is not None:
+            return result
+
     ps_ok, servers = _find_language_servers(_note)
     for pid, csrf in servers:
         ports = _listening_ports(pid, _note)
@@ -602,32 +827,11 @@ def fetch_live_quota_summary(
 
         for port in sorted(ports):
             base_url = f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService"
-            headers = {
-                "Content-Type": "application/json",
-                "Connect-Protocol-Version": "1",
-                "x-codeium-csrf-token": csrf,
-            }
-            try:
-                quota_data = _post_connect(base_url, "RetrieveUserQuotaSummary", headers, 1.2)
-                if "response" not in quota_data or "groups" not in quota_data["response"]:
-                    _note(f"port {port}: response has no quota groups")
-                    continue
-
-                buckets = _extract_buckets(quota_data)
-                user_tier_id, user_tier_name = _fetch_user_tier(base_url, headers)
-                result = {
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
-                    "user_tier_id": user_tier_id,
-                    "user_tier_name": user_tier_name,
-                    "buckets": buckets,
-                }
-                _write_quota_cache(result)
+            result = _query_quota_endpoint(base_url, csrf, f"port {port}", _note)
+            if result is not None:
                 return result
-            except Exception as exc:
-                _note(f"port {port}: {str(exc)[:80] or exc.__class__.__name__}")
-                continue
 
-    if ps_ok and not servers:
+    if ps_ok and not servers and not tried_direct:
         _note("no running Antigravity language_server found")
 
     return _read_quota_cache(_note) if use_cache else None
